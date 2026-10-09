@@ -15,10 +15,20 @@ class SanjeevaniEngine {
     private val compressionDetector = CompressionDetector()
     private val emergencyFSM = EmergencyFSM()
     private val patientDetector = PatientDetector()
+    private val classifier = EmergencyClassifier()
+    private val allergicModule = AllergicReactionModule()
+    private val strokeModule = StrokeModule()
 
     private var lastVoiceText: String? = null
     private var lastVoiceTs = 0L
-    private val MIN_VOICE_INTERVAL_MS = 2500L
+    private var lastTriageState = TriageState.OBSERVING
+    private var classifierSignal: ClassifierSignal? = null
+
+    private val MIN_VOICE_INTERVAL_MS: Long
+        get() = when (emergencyFSM.getConfirmedEmergencyType()) {
+            EmergencyType.ALLERGIC_REACTION, EmergencyType.HEART_ATTACK -> 5000L
+            else -> 2500L
+        }
 
     fun process(frame: PerceptionFrame): GuidanceState {
         val nowMs = frame.timestamp
@@ -45,6 +55,18 @@ class SanjeevaniEngine {
         // ── Patient detection ─────────────────────────────────────────────────
         val (isPatient, patientConf) = patientDetector.isPatientLying(frame.poseLandmarks)
 
+        // ── Visual classification ─────────────────────────────────────────────
+        classifier.addFrame(frame.poseLandmarks)
+        val fsmState = emergencyFSM.getState()
+        if (fsmState == FSMState.SCENE_ASSESSMENT || fsmState == FSMState.TRIAGE_DETECTION) {
+            classifierSignal = classifier.classify()
+        }
+        val triageState = when {
+            fsmState == FSMState.TRIAGE_DETECTION -> TriageState.CAMERA_SUGGESTS
+            emergencyFSM.getConfirmedEmergencyType() != EmergencyType.UNKNOWN -> TriageState.USER_CONFIRMED
+            else -> TriageState.OBSERVING
+        }
+
         // ── Spatial reasoning ─────────────────────────────────────────────────
         val spatial = spatialReasoner.compute(
             frame.poseLandmarks,
@@ -70,18 +92,30 @@ class SanjeevaniEngine {
 
         val prelimGuidance = GuidanceState(
             fsmState = emergencyFSM.getState(),
+            emergencyType = emergencyFSM.getConfirmedEmergencyType(),
             spatial = spatial,
             temporal = temporal,
             confidence = confidence,
             isPatientDetected = isPatient,
-            isRescuerDetected = isRescuer
+            isRescuerDetected = isRescuer,
+            triageState = triageState,
+            classifierSignal = classifierSignal
         )
 
         // ── FSM transition ─────────────────────────────────────────────────────
         val transition = emergencyFSM.process(prelimGuidance, nowMs)
 
+        // ── Module dispatch ────────────────────────────────────────────────────
+        val confirmedType = emergencyFSM.getConfirmedEmergencyType()
+        val moduleResult: ModuleResult? = when (transition.newState) {
+            FSMState.ALLERGIC_PROTOCOL    -> allergicModule.process(frame, nowMs)
+            FSMState.STROKE_FAST_TEST     -> strokeModule.process(frame, nowMs)
+            else -> null
+        }
+
         // ── Voice throttling ───────────────────────────────────────────────────
-        val voiceText = transition.voiceText?.let { text ->
+        val rawVoice = moduleResult?.voiceText ?: transition.voiceText
+        val voiceText = rawVoice?.let { text ->
             if (text != lastVoiceText || nowMs - lastVoiceTs > MIN_VOICE_INTERVAL_MS) {
                 lastVoiceText = text
                 lastVoiceTs = nowMs
@@ -90,18 +124,23 @@ class SanjeevaniEngine {
         }
 
         // ── Build AR overlay ───────────────────────────────────────────────────
-        val overlay = buildOverlay(transition.newState, spatial, temporal, frame)
+        val overlay = moduleResult?.overlay
+            ?: buildOverlay(transition.newState, spatial, temporal, frame)
+
+        val effectiveType = if (confirmedType != EmergencyType.UNKNOWN) confirmedType else EmergencyType.CPR
 
         return GuidanceState(
             fsmState = transition.newState,
-            emergencyType = EmergencyType.CPR,
+            emergencyType = effectiveType,
             spatial = spatial,
             temporal = temporal,
             confidence = confidence,
             overlay = overlay,
             voiceText = voiceText,
             isPatientDetected = isPatient,
-            isRescuerDetected = isRescuer
+            isRescuerDetected = isRescuer,
+            triageState = triageState,
+            classifierSignal = classifierSignal
         )
     }
 
@@ -176,4 +215,14 @@ class SanjeevaniEngine {
 
     fun confirmNoResponse(nowMs: Long) = emergencyFSM.confirmNoResponse(nowMs)
     fun getFSMState() = emergencyFSM.getState()
+
+    fun setUserSelectedEmergency(type: EmergencyType) {
+        val nowMs = System.currentTimeMillis()
+        emergencyFSM.setUserSelectedEmergency(type, nowMs)
+        // Reset modules that weren't selected
+        if (type != EmergencyType.ALLERGIC_REACTION) allergicModule.reset()
+        if (type != EmergencyType.FAST_STROKE) strokeModule.reset()
+    }
+
+    fun onStrokeSpeechResult(positive: Boolean) = strokeModule.onSpeechResult(positive)
 }

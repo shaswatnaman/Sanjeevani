@@ -13,8 +13,10 @@ class EmergencyFSM {
     private var currentState = FSMState.IDLE
     private var stateEnteredAt = 0L
     private var handsCorrectSince = 0L
+    private var confirmedEmergencyType = EmergencyType.UNKNOWN
 
     fun getState() = currentState
+    fun getConfirmedEmergencyType() = confirmedEmergencyType
 
     fun process(
         guidance: GuidanceState,
@@ -23,12 +25,16 @@ class EmergencyFSM {
         return when (currentState) {
             FSMState.IDLE -> processIdle(guidance, nowMs)
             FSMState.SCENE_ASSESSMENT -> processSceneAssessment(guidance, nowMs)
+            FSMState.TRIAGE_DETECTION -> processTriageDetection(guidance, nowMs)
             FSMState.RESPONSIVENESS_CHECK -> processResponsivenessCheck(nowMs)
             FSMState.EMERGENCY_ESCALATION -> processEscalation(nowMs)
             FSMState.CPR_POSITIONING -> processCPRPositioning(guidance, nowMs)
             FSMState.HAND_POSITIONING -> processHandPositioning(guidance, nowMs)
             FSMState.POSTURE_CHECK -> processPostureCheck(guidance, nowMs)
             FSMState.COMPRESSION_ACTIVE -> processCompressionActive(guidance, nowMs)
+            FSMState.STROKE_FAST_TEST -> FSMTransitionResult(currentState, null)
+            FSMState.HEART_ATTACK_CONSCIOUS -> FSMTransitionResult(currentState, null)
+            FSMState.ALLERGIC_PROTOCOL -> FSMTransitionResult(currentState, null)
             else -> FSMTransitionResult(currentState, null)
         }
     }
@@ -46,8 +52,18 @@ class EmergencyFSM {
     }
 
     private fun processSceneAssessment(guidance: GuidanceState, nowMs: Long): FSMTransitionResult {
-        // Auto-classify CPR if patient is horizontal
         if (guidance.isPatientDetected && nowMs - stateEnteredAt > 2000L) {
+            // Route based on classifier signal
+            val signal = guidance.classifierSignal
+            if (signal != null && signal.confidence > 0.4f && signal.suggestedByCamera) {
+                transition(FSMState.TRIAGE_DETECTION, nowMs)
+                return FSMTransitionResult(
+                    FSMState.TRIAGE_DETECTION,
+                    "I can see someone in distress. Please confirm what is happening.",
+                    requiresUserConfirmation = true
+                )
+            }
+            // Default: treat as unresponsive → CPR path
             transition(FSMState.RESPONSIVENESS_CHECK, nowMs)
             return FSMTransitionResult(
                 FSMState.RESPONSIVENESS_CHECK,
@@ -56,6 +72,20 @@ class EmergencyFSM {
             )
         }
         return FSMTransitionResult(FSMState.SCENE_ASSESSMENT, null)
+    }
+
+    private fun processTriageDetection(guidance: GuidanceState, nowMs: Long): FSMTransitionResult {
+        // Waits for setUserSelectedEmergency() or times out to CPR after 20s
+        if (nowMs - stateEnteredAt > 20_000L) {
+            // Timeout: fall through to responsiveness check
+            transition(FSMState.RESPONSIVENESS_CHECK, nowMs)
+            return FSMTransitionResult(
+                FSMState.RESPONSIVENESS_CHECK,
+                "Tap their shoulder and call their name. Are they responding?",
+                requiresUserConfirmation = true
+            )
+        }
+        return FSMTransitionResult(FSMState.TRIAGE_DETECTION, null)
     }
 
     private fun processResponsivenessCheck(nowMs: Long): FSMTransitionResult {
@@ -150,6 +180,20 @@ class EmergencyFSM {
         if (currentState == FSMState.RESPONSIVENESS_CHECK) {
             transition(FSMState.EMERGENCY_ESCALATION, nowMs)
         }
+    }
+
+    // Called when user selects emergency type from the triage screen
+    fun setUserSelectedEmergency(type: EmergencyType, nowMs: Long) {
+        if (currentState != FSMState.TRIAGE_DETECTION) return
+        confirmedEmergencyType = type
+        val nextState = when (type) {
+            EmergencyType.CPR              -> FSMState.RESPONSIVENESS_CHECK
+            EmergencyType.FAST_STROKE      -> FSMState.STROKE_FAST_TEST
+            EmergencyType.HEART_ATTACK     -> FSMState.HEART_ATTACK_CONSCIOUS
+            EmergencyType.ALLERGIC_REACTION -> FSMState.ALLERGIC_PROTOCOL
+            EmergencyType.UNKNOWN          -> FSMState.TRIAGE_DETECTION
+        }
+        if (nextState != FSMState.TRIAGE_DETECTION) transition(nextState, nowMs)
     }
 
     private fun transition(newState: FSMState, nowMs: Long) {
