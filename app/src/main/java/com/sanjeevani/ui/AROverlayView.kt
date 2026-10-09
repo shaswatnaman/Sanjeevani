@@ -30,7 +30,13 @@ class AROverlayView(context: Context) : View(context) {
         strokeWidth = 8f; strokeCap = Paint.Cap.ROUND
     }
     private val skeletonPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(160, 0, 200, 255); style = Paint.Style.STROKE; strokeWidth = 4f
+        color = Color.argb(200, 0, 200, 255); style = Paint.Style.STROKE; strokeWidth = 6f
+    }
+    private val jointDotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+    private val jointOutlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(180, 0, 0, 0); style = Paint.Style.STROKE; strokeWidth = 2f
     }
     private val handDotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.YELLOW; style = Paint.Style.FILL
@@ -56,6 +62,58 @@ class AROverlayView(context: Context) : View(context) {
     private val badgeTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE; textSize = 32f; typeface = Typeface.DEFAULT_BOLD
     }
+    // iOS-style step card paints
+    private val cardBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val cardTitlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE; textSize = 46f; typeface = Typeface.DEFAULT_BOLD
+        setShadowLayer(2f, 1f, 1f, Color.argb(120, 0, 0, 0))
+    }
+    private val cardBodyPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(230, 255, 255, 255); textSize = 34f
+    }
+    private val cardStatusPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE; textSize = 38f; typeface = Typeface.DEFAULT_BOLD
+    }
+    private val comprCountPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE; textSize = 50f; typeface = Typeface.DEFAULT_BOLD
+    }
+    private val comprTimePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(255, 220, 50); textSize = 40f; typeface = Typeface.DEFAULT_BOLD
+    }
+    private val comprCounterBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(210, 0, 0, 0); style = Paint.Style.FILL
+    }
+    // iOS CPR header badge paints
+    private val cprBadgeBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(230, 190, 40, 40); style = Paint.Style.FILL
+    }
+    private val cprBadgeTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE; textSize = 38f; typeface = Typeface.DEFAULT_BOLD
+        setShadowLayer(2f, 1f, 1f, Color.argb(120, 0, 0, 0))
+    }
+    private val cprSubtitlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE; textSize = 26f
+        setShadowLayer(2f, 1f, 1f, Color.argb(120, 0, 0, 0))
+    }
+    // iOS vitals panel paints
+    private val vitalsPanelBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(180, 20, 20, 30); style = Paint.Style.FILL
+    }
+    private val vitalsPanelBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(60, 255, 255, 255); style = Paint.Style.STROKE; strokeWidth = 1.5f
+    }
+    private val vitalsLabelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(200, 255, 255, 255); textSize = 22f
+    }
+    private val vitalsBpmPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE; textSize = 46f; typeface = Typeface.DEFAULT_BOLD
+    }
+    private val vitalsGreenDotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(50, 205, 50); style = Paint.Style.FILL
+    }
+    private val vitalsHeartPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(140, 180, 180, 180); style = Paint.Style.FILL; textSize = 54f
+    }
     private val progressBarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
     }
@@ -71,6 +129,7 @@ class AROverlayView(context: Context) : View(context) {
     private val shoulderBarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE; strokeWidth = 5f; strokeCap = Paint.Cap.ROUND
     }
+    // Face mesh paint kept for potential future use but not rendered (adds visual noise)
 
     private var epiPenPulseRadius = 40f
     private var epiPenPulseGrowing = true
@@ -79,26 +138,65 @@ class AROverlayView(context: Context) : View(context) {
         super.onDraw(canvas)
         val spec = overlaySpec ?: return
 
+        // ── iOS-matching CPR header badge (top-center) ────────────────────────
+        if (spec.showCPRBadge) drawCPRHeaderBadge(canvas, spec)
+
+        // ── iOS-matching vitals panel (upper-left) ────────────────────────────
+        if (spec.showVitalsPanel) drawVitalsPanel(canvas)
+
         // ── Multi-emergency overlays (drawn first, behind CPR elements) ────────
         drawEmergencyBadge(canvas, spec)
         drawEpiPenMarker(canvas, spec)
         drawPhaseProgressBar(canvas, spec)
         drawStrokeAsymmetryBars(canvas, spec)
 
-        // ── Skeleton ─────────────────────────────────────────────────────────
+        // ── Skeleton bones — iOS yellow, thin (mirrors BodySkeleton.swift yellow bones) ──
+        skeletonPaint.strokeWidth = 6f
         spec.skeletonLines.forEach { (from, to) ->
+            skeletonPaint.color = Color.argb(220, 255, 214, 10)   // iOS systemYellow
             canvas.drawLine(from.x * width, from.y * height, to.x * width, to.y * height, skeletonPaint)
         }
 
-        // ── Sternum target circle ─────────────────────────────────────────────
+        // ── Joint dots (heatmap colored, large and precise like iOS) ─────────
+        spec.jointPoints.forEach { (pt, color) ->
+            val px = pt.x * width
+            val py = pt.y * height
+            val radius = 22f
+            // Dark outline for contrast against any background
+            jointOutlinePaint.strokeWidth = 3f
+            canvas.drawCircle(px, py, radius + 2f, jointOutlinePaint)
+            jointDotPaint.color = color
+            canvas.drawCircle(px, py, radius, jointDotPaint)
+        }
+
+        // ── Sternum target: iOS-style large blue sphere with sheen ────────────
         spec.sternumTarget?.let { t ->
             val px = t.x * width
             val py = t.y * height
-            val isCorrect = spec.statusColorGreen
-            val targetPaint = if (isCorrect) targetPaintGreen else targetPaintRed
-            canvas.drawCircle(px, py, 50f, targetFillPaint)
-            canvas.drawCircle(px, py, 50f, targetPaint)
-            canvas.drawCircle(px, py, 8f, if (isCorrect) targetPaintGreen else targetPaintRed)
+            val r = 58f
+            // Outer glow
+            val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.argb(60, 80, 200, 255); style = Paint.Style.FILL
+            }
+            canvas.drawCircle(px, py, r + 18f, glowPaint)
+            // Main sphere body — iOS cyan-blue
+            val spherePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                shader = android.graphics.RadialGradient(
+                    px - r * 0.28f, py - r * 0.28f, r,
+                    intArrayOf(
+                        Color.argb(255, 130, 220, 255),
+                        Color.argb(255, 30, 130, 220)
+                    ),
+                    floatArrayOf(0f, 1f),
+                    android.graphics.Shader.TileMode.CLAMP
+                )
+            }
+            canvas.drawCircle(px, py, r, spherePaint)
+            // Specular highlight (top-left white spot)
+            val highlightPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.argb(120, 255, 255, 255); style = Paint.Style.FILL
+            }
+            canvas.drawCircle(px - r * 0.28f, py - r * 0.28f, r * 0.32f, highlightPaint)
         }
 
         // ── Hand marker ───────────────────────────────────────────────────────
@@ -116,21 +214,16 @@ class AROverlayView(context: Context) : View(context) {
             }
         }
 
-        // ── Status badge (top) ─────────────────────────────────────────────────
-        if (spec.statusText.isNotEmpty()) {
-            val textWidth = statusTextPaint.measureText(spec.statusText)
-            val bx = (width - textWidth) / 2f - 16f
-            statusTextPaint.color = if (spec.statusColorGreen) Color.GREEN else Color.rgb(255, 200, 0)
-            canvas.drawText(spec.statusText, bx + 16f, 80f, statusTextPaint)
-        }
+        // ── iOS-style step card (upper-right) ─────────────────────────────────
+        drawStepCard(canvas, spec)
 
-        // ── Guidance direction text (center) ──────────────────────────────────
+        // ── Guidance direction arrow text (center-bottom, only while positioning) ─
         if (spec.guidanceText.isNotEmpty()) {
             val tw = guidancePaint.measureText(spec.guidanceText)
-            canvas.drawText(spec.guidanceText, (width - tw) / 2f, height * 0.75f, guidancePaint)
+            canvas.drawText(spec.guidanceText, (width - tw) / 2f, height * 0.82f, guidancePaint)
         }
 
-        // ── Compression rate badge (bottom) ───────────────────────────────────
+        // ── Compression rate badge (bottom, shown during active CPR) ──────────
         spec.compressionRate?.let { bpm ->
             val bpmText = if (bpm > 0f) "CPR: ${bpm.toInt()} BPM" else "Begin compressions"
             val tw = ratePaint.measureText(bpmText)
@@ -146,6 +239,125 @@ class AROverlayView(context: Context) : View(context) {
         }
     }
 
+    // "🫀 CPR/Heart Attack" pill + subtitle — matches iOS CardiacArrestView header
+    private fun drawCPRHeaderBadge(canvas: Canvas, spec: AROverlaySpec) {
+        val label = if (spec.emergencyType == EmergencyType.HEART_ATTACK) "🫀 Heart Attack" else "🫀 CPR"
+        val sublabel = if (spec.emergencyType == EmergencyType.HEART_ATTACK) "Cardiac Emergency" else "Chest Compressions"
+        val pill_h = 56f; val pill_r = 14f; val pad = 20f
+        val tw = cprBadgeTextPaint.measureText(label)
+        val left = (width - tw) / 2f - pad
+        val right = (width + tw) / 2f + pad
+        val top = 55f; val bottom = top + pill_h
+        canvas.drawRoundRect(left, top, right, bottom, pill_r, pill_r, cprBadgeBgPaint)
+        canvas.drawText(label, left + pad, top + pill_h * 0.72f, cprBadgeTextPaint)
+        // Subtitle below the pill
+        val sw = cprSubtitlePaint.measureText(sublabel)
+        val subBgLeft = (width - sw) / 2f - 16f
+        val subBgTop = bottom + 6f
+        val subBgPaint = Paint(cprBadgeBgPaint).apply { color = Color.argb(180, 0, 0, 0) }
+        canvas.drawRoundRect(subBgLeft, subBgTop, subBgLeft + sw + 32f, subBgTop + 36f, 8f, 8f, subBgPaint)
+        canvas.drawText(sublabel, subBgLeft + 16f, subBgTop + 26f, cprSubtitlePaint)
+    }
+
+    // iOS EnhancedVitalsPanel (isCardiacArrest=true): shows "Data Synced", grey heart, "- BPM"
+    private fun drawVitalsPanel(canvas: Canvas) {
+        val panelW = width * 0.42f
+        val panelH = 230f
+        val left = 16f; val top = height * 0.28f
+        val right = left + panelW; val bottom = top + panelH
+        val r = 20f
+
+        // Frosted-glass background
+        canvas.drawRoundRect(left, top, right, bottom, r, r, vitalsPanelBgPaint)
+        canvas.drawRoundRect(left, top, right, bottom, r, r, vitalsPanelBorderPaint)
+
+        // "Data Synced ✓   < >" header row
+        canvas.drawCircle(left + 22f, top + 22f, 7f, vitalsGreenDotPaint)
+        canvas.drawText("Data Synced", left + 34f, top + 30f, vitalsLabelPaint)
+        val arrowPaintLocal = Paint(vitalsLabelPaint).apply { textSize = 28f; color = Color.argb(150, 255, 255, 255) }
+        canvas.drawText("<  >", right - 66f, top + 30f, arrowPaintLocal)
+
+        // Grey heart icon (heart.fill equivalent) — we draw ♥ in grey
+        val heartPaintLocal = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(140, 160, 160, 160); textSize = 60f
+        }
+        val heartStr = "♥"
+        val hx = (left + right) / 2f - heartPaintLocal.measureText(heartStr) / 2f
+        canvas.drawText(heartStr, hx, top + 120f, heartPaintLocal)
+
+        // "- BPM" text
+        val bpmStr = "- BPM"
+        val bx = (left + right) / 2f - vitalsBpmPaint.measureText(bpmStr) / 2f
+        canvas.drawText(bpmStr, bx, top + 175f, vitalsBpmPaint)
+    }
+
+    // Draw a floating iOS-style step instruction card in the upper-right area
+    private fun drawStepCard(canvas: Canvas, spec: AROverlaySpec) {
+        if (spec.stepCardTitle.isEmpty()) return
+
+        val cardLeft = width * 0.38f
+        val cardRight = width - 20f
+        val cardTop = height * 0.14f
+        val cardW = cardRight - cardLeft
+        val padding = 24f
+        val lineH = 46f
+        val radius = 24f
+
+        // Measure body text (wrap at card width)
+        val bodyLines = wrapText(spec.stepCardInstruction, cardBodyPaint, cardW - padding * 2)
+        val cardH = padding + lineH + 12f + (bodyLines.size * lineH * 0.9f) + 20f + lineH + padding
+
+        // Card background
+        cardBgPaint.color = if (spec.stepCardBgColor != 0) spec.stepCardBgColor else Color.argb(210, 50, 50, 50)
+        canvas.drawRoundRect(cardLeft, cardTop, cardRight, cardTop + cardH, radius, radius, cardBgPaint)
+
+        var y = cardTop + padding + lineH * 0.75f
+
+        // Title row: icon + title
+        val titleText = "${spec.stepCardIcon}  ${spec.stepCardTitle}"
+        canvas.drawText(titleText, cardLeft + padding, y, cardTitlePaint)
+        y += lineH + 12f
+
+        // Body instruction (multi-line)
+        for (line in bodyLines) {
+            canvas.drawText(line, cardLeft + padding, y, cardBodyPaint)
+            y += lineH * 0.9f
+        }
+        y += 16f
+
+        // Status line (bold white)
+        canvas.drawText(spec.stepCardStatus, cardLeft + padding, y, cardStatusPaint)
+
+        // Compression counter below card (only during compressions)
+        if (spec.compressionCount > 0 || spec.elapsedSecs > 0) {
+            val counterTop = cardTop + cardH + 16f
+            val counterH = 110f
+            canvas.drawRoundRect(cardLeft, counterTop, cardRight, counterTop + counterH, radius, radius, comprCounterBgPaint)
+            canvas.drawText("Compressions: ${spec.compressionCount}", cardLeft + padding, counterTop + 52f, comprCountPaint)
+            val mm = spec.elapsedSecs / 60
+            val ss = spec.elapsedSecs % 60
+            canvas.drawText("Time: %02d:%02d".format(mm, ss), cardLeft + padding, counterTop + 98f, comprTimePaint)
+        }
+    }
+
+    // Simple word-wrap: split instruction into lines that fit within maxW pixels
+    private fun wrapText(text: String, paint: Paint, maxW: Float): List<String> {
+        val words = text.split(" ")
+        val lines = mutableListOf<String>()
+        var current = ""
+        for (word in words) {
+            val candidate = if (current.isEmpty()) word else "$current $word"
+            if (paint.measureText(candidate) <= maxW) {
+                current = candidate
+            } else {
+                if (current.isNotEmpty()) lines.add(current)
+                current = word
+            }
+        }
+        if (current.isNotEmpty()) lines.add(current)
+        return lines
+    }
+
     private fun emergencyColor(type: EmergencyType): Int = when (type) {
         EmergencyType.FAST_STROKE       -> Color.rgb(167, 139, 250)
         EmergencyType.HEART_ATTACK      -> Color.rgb(249, 115, 22)
@@ -155,7 +367,8 @@ class AROverlayView(context: Context) : View(context) {
 
     private fun drawEmergencyBadge(canvas: Canvas, spec: AROverlaySpec) {
         val type = spec.emergencyType
-        if (type == EmergencyType.UNKNOWN || type == EmergencyType.CPR) return
+        // CPR and HEART_ATTACK both use the CPR-style header badge; skip the generic badge for them
+        if (type == EmergencyType.UNKNOWN || type == EmergencyType.CPR || type == EmergencyType.HEART_ATTACK) return
         val color = emergencyColor(type)
         val label = when (type) {
             EmergencyType.FAST_STROKE       -> "STROKE"

@@ -182,9 +182,8 @@ class EmergencyFSM {
         }
     }
 
-    // Called when user selects emergency type from the triage screen
+    // Called when user selects emergency type from the selection screen (works from any state)
     fun setUserSelectedEmergency(type: EmergencyType, nowMs: Long) {
-        if (currentState != FSMState.TRIAGE_DETECTION) return
         confirmedEmergencyType = type
         val nextState = when (type) {
             EmergencyType.CPR              -> FSMState.RESPONSIVENESS_CHECK
@@ -193,7 +192,7 @@ class EmergencyFSM {
             EmergencyType.ALLERGIC_REACTION -> FSMState.ALLERGIC_PROTOCOL
             EmergencyType.UNKNOWN          -> FSMState.TRIAGE_DETECTION
         }
-        if (nextState != FSMState.TRIAGE_DETECTION) transition(nextState, nowMs)
+        transition(nextState, nowMs)
     }
 
     private fun transition(newState: FSMState, nowMs: Long) {

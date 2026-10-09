@@ -53,7 +53,11 @@ data class PerceptionFrame(
     val leftHandLandmarks: List<NormalizedLandmark>?,
     val rightHandLandmarks: List<NormalizedLandmark>?,
     val imageWidth: Int,
-    val imageHeight: Int
+    val imageHeight: Int,
+    // 3D world landmarks in meters (origin = hip midpoint; Y=up, Z=toward camera)
+    val worldLandmarks: List<NormalizedLandmark>? = null,
+    // 478 face mesh landmarks (normalized screen coords)
+    val faceLandmarks: List<NormalizedLandmark>? = null
 )
 
 // ─── Scene ───────────────────────────────────────────────────────────────────
@@ -117,11 +121,28 @@ data class AROverlaySpec(
     val rightHandCenter: PointF? = null,
     val arrowFrom: PointF? = null,
     val arrowTo: PointF? = null,
+    // Legacy text fields (kept for compatibility)
     val statusText: String = "",
     val statusColorGreen: Boolean = false,
     val compressionRate: Float? = null,
     val skeletonLines: List<Pair<PointF, PointF>> = emptyList(),
     val guidanceText: String = "",
+    // Full joint points for heatmap rendering: (position, argb color)
+    val jointPoints: List<Pair<PointF, Int>> = emptyList(),
+    // Face mesh contour points for 478-landmark rendering (not rendered, kept for analysis)
+    val faceMeshPoints: List<PointF> = emptyList(),
+    // iOS-style step card fields
+    val stepCardTitle: String = "",        // e.g. "1. Position Check"
+    val stepCardInstruction: String = "",  // body text
+    val stepCardStatus: String = "",       // bold status line at bottom of card
+    val stepCardBgColor: Int = 0,         // card background ARGB
+    val stepCardIcon: String = "",         // emoji icon shown before title
+    val compressionCount: Int = 0,
+    val elapsedSecs: Int = 0,
+    // Vitals panel (left side, matching iOS EnhancedVitalsPanel)
+    val showVitalsPanel: Boolean = false,
+    // Whether to show the "🫀 CPR / Chest Compressions" header badge
+    val showCPRBadge: Boolean = false,
     // Multi-emergency fields
     val emergencyType: EmergencyType = EmergencyType.UNKNOWN,
     val phaseProgress: Float = 0f,

@@ -19,3 +19,8 @@ out/
 release/
 gradlew.bat
 .kotlin/
+
+# Large model files — download via setup_kokoro.sh / download_models.sh
+app/src/main/assets/kokoro.zip
+app/src/main/assets/*.task
+app/libs/*.aar
