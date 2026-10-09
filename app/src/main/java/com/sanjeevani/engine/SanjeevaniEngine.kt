@@ -153,9 +153,23 @@ class SanjeevaniEngine {
             else -> null
         }
 
+        // ── Spatial action voice (hand placement corrections) ─────────────────
+        val spatialActionVoice: String? = if (cprWorkflow.currentStep == CPRStep.HAND_PLACEMENT ||
+            cprWorkflow.currentStep == CPRStep.COMPRESSIONS
+        ) {
+            when (spatial.correctiveAction) {
+                SpatialAction.STACK_HANDS  -> "Stack both hands on top of each other on the blue marker."
+                SpatialAction.MOVE_LEFT    -> "Move hands left toward the blue marker."
+                SpatialAction.MOVE_RIGHT   -> "Move hands right toward the blue marker."
+                SpatialAction.MOVE_UP      -> "Move hands up toward the blue marker."
+                SpatialAction.MOVE_DOWN    -> "Move hands down toward the blue marker."
+                else -> null
+            }
+        } else null
+
         // ── Voice throttling ───────────────────────────────────────────────────
-        // stepVoice fires on CPR step changes (highest priority), then module/FSM voices
-        val rawVoice = stepVoice ?: moduleResult?.voiceText ?: transition.voiceText
+        // Priority: step change > spatial correction > module > FSM transition
+        val rawVoice = stepVoice ?: spatialActionVoice ?: moduleResult?.voiceText ?: transition.voiceText
         val voiceText = rawVoice?.let { text ->
             if (text != lastVoiceText || nowMs - lastVoiceTs > MIN_VOICE_INTERVAL_MS) {
                 lastVoiceText = text
@@ -271,6 +285,7 @@ class SanjeevaniEngine {
         SpatialAction.MOVE_RIGHT -> "Move Right →"
         SpatialAction.MOVE_UP -> "↑ Move Up"
         SpatialAction.MOVE_DOWN -> "↓ Move Down"
+        SpatialAction.STACK_HANDS -> "⊕ Stack hands"
         SpatialAction.CORRECT -> ""
         SpatialAction.TRACKING_LOST -> "Hold camera steady"
         SpatialAction.UNSURE -> ""

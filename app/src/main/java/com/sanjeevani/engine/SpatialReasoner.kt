@@ -23,6 +23,9 @@ private const val STERNUM_TORSO_RATIO = 0.28f   // 28% from shoulder midpoint to
 private const val CORRECTION_THRESHOLD = 0.04f
 private const val HYSTERESIS = 0.01f
 private const val MIN_ACTION_CHANGE_MS = 500L
+// If two hands are detected and their centers are more than this apart, they are NOT stacked.
+// 0.08 in normalized coords ≈ 58px at 720px wide — more than one hand-width apart = wrong.
+private const val HAND_STACK_THRESHOLD = 0.08f
 
 class SpatialReasoner {
 
@@ -55,12 +58,12 @@ class SpatialReasoner {
         val target = estimateSternumTarget(poseLandmarks)
             ?: return SpatialState(correctiveAction = SpatialAction.TRACKING_LOST)
 
-        val handCenter = estimateBothHandsCenter(leftHand, rightHand)
-            ?: estimateWristCenter(poseLandmarks)
-            ?: return SpatialState(
-                sternumTarget = target,
-                correctiveAction = SpatialAction.TRACKING_LOST
-            )
+        val (handCenter, handSpread) = estimateBothHandsCenterAndSpread(leftHand, rightHand)
+            ?: (estimateWristCenter(poseLandmarks) to 0f)
+        if (handCenter == null) return SpatialState(
+            sternumTarget = target,
+            correctiveAction = SpatialAction.TRACKING_LOST
+        )
 
         val rawDx = handCenter.x - target.x
         val rawDy = handCenter.y - target.y
@@ -68,7 +71,7 @@ class SpatialReasoner {
         val smoothDy = smoothedErrorY.update(rawDy)
         val mag = sqrt(smoothDx * smoothDx + smoothDy * smoothDy)
 
-        val action = computeAction(smoothDx, smoothDy, mag, nowMs)
+        val action = computeAction(smoothDx, smoothDy, mag, handSpread, nowMs)
 
         return SpatialState(
             sternumTarget = target,
@@ -111,19 +114,24 @@ class SpatialReasoner {
         return PointF(x, y)
     }
 
-    private fun estimateBothHandsCenter(
+    // Returns center + spread between the two palms (0f if only one hand detected).
+    private fun estimateBothHandsCenterAndSpread(
         left: List<NormalizedLandmark>?,
         right: List<NormalizedLandmark>?
-    ): PointF? {
-        val centers = listOfNotNull(
-            left?.let { palmCenter(it) },
-            right?.let { palmCenter(it) }
-        )
-        if (centers.isEmpty()) return null
-        return PointF(
-            centers.map { it.x }.average().toFloat(),
-            centers.map { it.y }.average().toFloat()
-        )
+    ): Pair<PointF, Float>? {
+        val lc = left?.let { palmCenter(it) }
+        val rc = right?.let { palmCenter(it) }
+        return when {
+            lc != null && rc != null -> {
+                val cx = (lc.x + rc.x) / 2f
+                val cy = (lc.y + rc.y) / 2f
+                val spread = sqrt((lc.x - rc.x).let { it * it } + (lc.y - rc.y).let { it * it })
+                Pair(PointF(cx, cy), spread)
+            }
+            lc != null -> Pair(lc, 0f)
+            rc != null -> Pair(rc, 0f)
+            else -> null
+        }
     }
 
     private fun palmCenter(hand: List<NormalizedLandmark>): PointF {
@@ -144,8 +152,10 @@ class SpatialReasoner {
         return PointF((lw.x + rw.x) / 2f, (lw.y + rw.y) / 2f)
     }
 
-    private fun computeAction(dx: Float, dy: Float, mag: Float, nowMs: Long): SpatialAction {
+    private fun computeAction(dx: Float, dy: Float, mag: Float, spread: Float, nowMs: Long): SpatialAction {
         val newAction = when {
+            // Hands are detected but not stacked — regardless of center position
+            spread > HAND_STACK_THRESHOLD -> SpatialAction.STACK_HANDS
             mag < CORRECTION_THRESHOLD - HYSTERESIS -> SpatialAction.CORRECT
             abs(dx) > abs(dy) -> if (dx > 0) SpatialAction.MOVE_LEFT else SpatialAction.MOVE_RIGHT
             else -> if (dy > 0) SpatialAction.MOVE_UP else SpatialAction.MOVE_DOWN

@@ -8,6 +8,7 @@ enum class EmergencyType { CPR, FAST_STROKE, HEART_ATTACK, ALLERGIC_REACTION, UN
 
 enum class SpatialAction {
     MOVE_LEFT, MOVE_RIGHT, MOVE_UP, MOVE_DOWN,
+    STACK_HANDS,                          // both hands detected but too far apart
     CORRECT, TRACKING_LOST, UNSURE
 }
 
