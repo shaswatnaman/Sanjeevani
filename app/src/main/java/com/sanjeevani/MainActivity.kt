@@ -12,15 +12,24 @@ import androidx.activity.viewModels
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.*
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -51,7 +60,9 @@ class MainActivity : ComponentActivity() {
 
     private val requestAudioPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { /* speech recognizer will work or not; no action needed */ }
+    ) { granted ->
+        if (granted) viewModel.onAudioPermissionGranted()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -144,8 +155,15 @@ class MainActivity : ComponentActivity() {
 fun SanjeevaniScreen(viewModel: SanjeevaniViewModel) {
     val guidance by viewModel.guidanceState.collectAsStateWithLifecycle()
     val isListening by viewModel.isListening.collectAsStateWithLifecycle()
+    val isSpeaking by viewModel.isSpeaking.collectAsStateWithLifecycle()
     val kokoroState by viewModel.kokoroState.collectAsStateWithLifecycle()
     val activity = androidx.compose.ui.platform.LocalContext.current as? MainActivity
+
+    LaunchedEffect(guidance.fsmState) {
+        if (guidance.fsmState == FSMState.RESPONSIVENESS_CHECK) {
+            viewModel.onResponsivenessCheckEntered()
+        }
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         // Camera preview — previewView + cameraPreview wired on every recomposition
@@ -170,6 +188,14 @@ fun SanjeevaniScreen(viewModel: SanjeevaniViewModel) {
             factory = { ctx -> AROverlayView(ctx) },
             update = { view -> view.overlaySpec = guidance.overlay },
             modifier = Modifier.fillMaxSize()
+        )
+
+        // AI speaking indicator — top-center, matches HaloVoiceIndicator
+        SanjeevaniVoiceIndicator(
+            isSpeaking = isSpeaking,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 80.dp)
         )
 
         // Emergency call button (top right)
@@ -258,10 +284,8 @@ fun SanjeevaniScreen(viewModel: SanjeevaniViewModel) {
             }
         }
 
-        // Triage screen — shown at startup and during camera triage; dismisses once emergency is chosen
-        val showSelectionScreen = guidance.fsmState == FSMState.IDLE
-            || guidance.fsmState == FSMState.SCENE_ASSESSMENT
-            || guidance.fsmState == FSMState.TRIAGE_DETECTION
+        // Voice-first triage gets eight seconds before the tap-button fallback appears.
+        val showSelectionScreen = guidance.fsmState == FSMState.TRIAGE_DETECTION
         if (showSelectionScreen) {
             EmergencySelectionScreen(
                 classifierSuggestion = guidance.classifierSignal?.emergencyType,
@@ -293,6 +317,90 @@ fun SanjeevaniScreen(viewModel: SanjeevaniViewModel) {
                 ) {
                     Text("✗ Speech Slurred", color = Color.White, fontSize = 14.sp)
                 }
+            }
+        }
+
+        // One-turn, state-aware voice help during active guidance. Tapping first
+        // stops guidance audio so speech recognition cannot hear the app itself.
+        val voiceCompanionAvailable = guidance.fsmState !in setOf(
+            FSMState.IDLE,
+            FSMState.SCENE_ASSESSMENT,
+            FSMState.TRIAGE_DETECTION,
+            FSMState.RESPONSIVENESS_CHECK
+        )
+        if (voiceCompanionAvailable) {
+            ExtendedFloatingActionButton(
+                onClick = {
+                    if (isListening) viewModel.stopListening()
+                    else viewModel.startVoiceCompanion()
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 20.dp, bottom = 112.dp),
+                containerColor = if (isListening) Color(0xFFE53935) else Color(0xFF075985),
+                contentColor = Color.White,
+                icon = { Text(if (isListening) "■" else "🎙", fontSize = 18.sp) },
+                text = { Text(if (isListening) "Listening…" else "Ask Sanjeevani") }
+            )
+        }
+    }
+}
+
+@Composable
+fun SanjeevaniVoiceIndicator(isSpeaking: Boolean, modifier: Modifier = Modifier) {
+    AnimatedVisibility(
+        visible = isSpeaking,
+        enter = fadeIn(tween(300)) + scaleIn(tween(300)),
+        exit = fadeOut(tween(300)) + scaleOut(tween(300)),
+        modifier = modifier
+    ) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .size(90.dp)
+                .border(2.dp, Color(0xFF4ADE80), CircleShape)
+                .clip(CircleShape)
+                .background(Color(0xCC000000))
+                .padding(10.dp)
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                // 5 animated wave bars — staggered like HaloVoiceIndicator
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.height(28.dp)
+                ) {
+                    repeat(5) { i ->
+                        val infiniteTransition = rememberInfiniteTransition(label = "wave_bar_$i")
+                        val barHeightFraction by infiniteTransition.animateFloat(
+                            initialValue = 0.15f,
+                            targetValue = 1.0f,
+                            animationSpec = infiniteRepeatable(
+                                animation = tween(500, easing = FastOutSlowInEasing),
+                                repeatMode = RepeatMode.Reverse,
+                                initialStartOffset = StartOffset(i * 80)
+                            ),
+                            label = "bar_$i"
+                        )
+                        val barHeight = (4 + 20 * barHeightFraction).dp
+                        Box(
+                            modifier = Modifier
+                                .width(4.dp)
+                                .height(barHeight)
+                                .background(Color(0xFF4ADE80), RoundedCornerShape(2.dp))
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Sanjeevani",
+                    color = Color(0xFF4ADE80),
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold
+                )
             }
         }
     }

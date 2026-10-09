@@ -1,7 +1,12 @@
 package com.sanjeevani.ui
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.ArgbEvaluator
+import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.*
+import android.os.Looper
 import android.view.View
 import com.sanjeevani.model.AROverlaySpec
 import com.sanjeevani.model.EmergencyType
@@ -10,9 +15,27 @@ class AROverlayView(context: Context) : View(context) {
 
     var overlaySpec: AROverlaySpec? = null
         set(value) {
+            val previous = field
             field = value
+            if (previous?.stepCardTitle == "1. Position Check" &&
+                value?.stepCardTitle == "1. Position Check" &&
+                isPositionRed(previous.stepCardBgColor) &&
+                isPositionGreen(value.stepCardBgColor)
+            ) {
+                startPositionReadyAnimation()
+            }
+            updateCompressionSphereAnimation(value)
+            updateHeartPulseAnimation(value)
             invalidate()
         }
+
+    private var stepCardScale = 1f
+    private var stepCardAnimator: ValueAnimator? = null
+    private var spherePulseFraction = 0f
+    private var spherePulseAnimator: ValueAnimator? = null
+    private val sphereColorEvaluator = ArgbEvaluator()
+    private var heartPulseFraction = 0f
+    private var heartPulseAnimator: ValueAnimator? = null
 
     // ── Paints ────────────────────────────────────────────────────────────────
 
@@ -69,7 +92,7 @@ class AROverlayView(context: Context) : View(context) {
         setShadowLayer(2f, 1f, 1f, Color.argb(120, 0, 0, 0))
     }
     private val cardBodyPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(230, 255, 255, 255); textSize = 34f
+        color = Color.WHITE; textSize = 34f
     }
     private val cardStatusPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE; textSize = 38f; typeface = Typeface.DEFAULT_BOLD
@@ -82,6 +105,16 @@ class AROverlayView(context: Context) : View(context) {
     }
     private val comprCounterBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.argb(210, 0, 0, 0); style = Paint.Style.FILL
+    }
+    private val sphereCountPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE; textSize = 76f; typeface = Typeface.DEFAULT_BOLD
+        textAlign = Paint.Align.CENTER
+        setShadowLayer(5f, 0f, 2f, Color.BLACK)
+    }
+    private val sphereCountLabelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE; textSize = 27f; typeface = Typeface.DEFAULT_BOLD
+        textAlign = Paint.Align.CENTER
+        setShadowLayer(4f, 0f, 2f, Color.BLACK)
     }
     // iOS CPR header badge paints
     private val cprBadgeBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -173,20 +206,43 @@ class AROverlayView(context: Context) : View(context) {
         spec.sternumTarget?.let { t ->
             val px = t.x * width
             val py = t.y * height
-            val r = 58f
+            val baseRadius = 58f
+            val pulseActive = spherePulseAnimator != null
+            val r = if (pulseActive) {
+                baseRadius * (0.65f + 0.35f * spherePulseFraction)
+            } else {
+                baseRadius
+            }
+            val pulseColor = if (pulseActive) {
+                sphereColorEvaluator.evaluate(
+                    spherePulseFraction,
+                    Color.argb(200, 0, 120, 255),
+                    Color.argb(240, 255, 60, 60)
+                ) as Int
+            } else {
+                Color.argb(255, 30, 130, 220)
+            }
             // Outer glow
             val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.argb(60, 80, 200, 255); style = Paint.Style.FILL
+                color = Color.argb(
+                    70,
+                    Color.red(pulseColor),
+                    Color.green(pulseColor),
+                    Color.blue(pulseColor)
+                )
+                style = Paint.Style.FILL
             }
             canvas.drawCircle(px, py, r + 18f, glowPaint)
             // Main sphere body — iOS cyan-blue
+            val highlightColor = sphereColorEvaluator.evaluate(
+                0.32f,
+                pulseColor,
+                Color.WHITE
+            ) as Int
             val spherePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 shader = android.graphics.RadialGradient(
                     px - r * 0.28f, py - r * 0.28f, r,
-                    intArrayOf(
-                        Color.argb(255, 130, 220, 255),
-                        Color.argb(255, 30, 130, 220)
-                    ),
+                    intArrayOf(highlightColor, pulseColor),
                     floatArrayOf(0f, 1f),
                     android.graphics.Shader.TileMode.CLAMP
                 )
@@ -197,6 +253,20 @@ class AROverlayView(context: Context) : View(context) {
                 color = Color.argb(120, 255, 255, 255); style = Paint.Style.FILL
             }
             canvas.drawCircle(px - r * 0.28f, py - r * 0.28f, r * 0.32f, highlightPaint)
+
+            if (spec.stepCardTitle == "5. Chest Compressions") {
+                val bpm = spec.compressionRate ?: 0f
+                val paceColor = when {
+                    bpm <= 0f -> Color.WHITE
+                    bpm < 90f || bpm > 130f -> Color.rgb(255, 59, 48)
+                    else -> Color.rgb(52, 211, 153)
+                }
+                sphereCountPaint.color = paceColor
+                sphereCountLabelPaint.color = paceColor
+                val countY = py - baseRadius - 70f
+                canvas.drawText(spec.compressionCount.toString(), px, countY, sphereCountPaint)
+                canvas.drawText("compressions", px, countY + 35f, sphereCountLabelPaint)
+            }
         }
 
         // ── Hand marker ───────────────────────────────────────────────────────
@@ -219,6 +289,13 @@ class AROverlayView(context: Context) : View(context) {
 
         // ── Guidance direction arrow text (center-bottom, only while positioning) ─
         if (spec.guidanceText.isNotEmpty()) {
+            val isHandPlacementCorrection = spec.stepCardTitle == "3. Hand Placement"
+            guidancePaint.color = if (isHandPlacementCorrection) {
+                Color.rgb(255, 59, 48) // 0xFFFF3B30
+            } else {
+                Color.rgb(255, 200, 0)
+            }
+            guidancePaint.typeface = Typeface.DEFAULT_BOLD
             val tw = guidancePaint.measureText(spec.guidanceText)
             canvas.drawText(spec.guidanceText, (width - tw) / 2f, height * 0.82f, guidancePaint)
         }
@@ -259,8 +336,9 @@ class AROverlayView(context: Context) : View(context) {
         canvas.drawText(sublabel, subBgLeft + 16f, subBgTop + 26f, cprSubtitlePaint)
     }
 
-    // iOS EnhancedVitalsPanel (isCardiacArrest=true): shows "Data Synced", grey heart, "- BPM"
+    // Vitals panel: shows real BPM from compressionRate with color coding + pulsing heart
     private fun drawVitalsPanel(canvas: Canvas) {
+        val spec = overlaySpec ?: return
         val panelW = width * 0.42f
         val panelH = 230f
         val left = 16f; val top = height * 0.28f
@@ -271,24 +349,48 @@ class AROverlayView(context: Context) : View(context) {
         canvas.drawRoundRect(left, top, right, bottom, r, r, vitalsPanelBgPaint)
         canvas.drawRoundRect(left, top, right, bottom, r, r, vitalsPanelBorderPaint)
 
-        // "Data Synced ✓   < >" header row
+        // Header row: green dot + "CPR Active"
         canvas.drawCircle(left + 22f, top + 22f, 7f, vitalsGreenDotPaint)
-        canvas.drawText("Data Synced", left + 34f, top + 30f, vitalsLabelPaint)
-        val arrowPaintLocal = Paint(vitalsLabelPaint).apply { textSize = 28f; color = Color.argb(150, 255, 255, 255) }
-        canvas.drawText("<  >", right - 66f, top + 30f, arrowPaintLocal)
+        canvas.drawText("CPR Active", left + 34f, top + 30f, vitalsLabelPaint)
 
-        // Grey heart icon (heart.fill equivalent) — we draw ♥ in grey
+        // Pulsing heart — scale 1.0→1.3 driven by heartPulseFraction
+        val heartScale = 1f + 0.3f * heartPulseFraction
+        val bpm = spec.compressionRate ?: 0f
+        val heartColor = when {
+            bpm in 100f..120f -> Color.rgb(255, 80, 80)    // good range: red heart
+            bpm > 0f -> Color.rgb(255, 160, 40)             // out of range: orange
+            else -> Color.argb(140, 160, 160, 160)          // no compressions: grey
+        }
         val heartPaintLocal = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(140, 160, 160, 160); textSize = 60f
+            color = heartColor; textSize = 60f * heartScale
         }
         val heartStr = "♥"
         val hx = (left + right) / 2f - heartPaintLocal.measureText(heartStr) / 2f
         canvas.drawText(heartStr, hx, top + 120f, heartPaintLocal)
 
-        // "- BPM" text
-        val bpmStr = "- BPM"
+        // BPM display: real value or "--"
+        val bpmStr = if (bpm > 0f) "${bpm.toInt()} BPM" else "-- BPM"
+        vitalsBpmPaint.color = when {
+            bpm in 100f..120f -> Color.rgb(52, 211, 153)    // green — safe range
+            bpm in 90f..130f -> Color.WHITE
+            bpm > 0f -> Color.rgb(255, 59, 48)              // red — out of range
+            else -> Color.WHITE
+        }
         val bx = (left + right) / 2f - vitalsBpmPaint.measureText(bpmStr) / 2f
         canvas.drawText(bpmStr, bx, top + 175f, vitalsBpmPaint)
+
+        // "safe range" badge when BPM 100-120
+        if (bpm in 100f..120f) {
+            val badgeStr = "safe range"
+            val sw = vitalsLabelPaint.measureText(badgeStr)
+            val bBgLeft = (left + right) / 2f - sw / 2f - 8f
+            val bBgTop = bottom - 38f
+            val safePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.argb(180, 34, 139, 34); style = Paint.Style.FILL
+            }
+            canvas.drawRoundRect(bBgLeft, bBgTop, bBgLeft + sw + 16f, bBgTop + 26f, 8f, 8f, safePaint)
+            canvas.drawText(badgeStr, bBgLeft + 8f, bBgTop + 18f, vitalsLabelPaint)
+        }
     }
 
     // Draw a floating iOS-style step instruction card in the upper-right area
@@ -306,6 +408,16 @@ class AROverlayView(context: Context) : View(context) {
         // Measure body text (wrap at card width)
         val bodyLines = wrapText(spec.stepCardInstruction, cardBodyPaint, cardW - padding * 2)
         val cardH = padding + lineH + 12f + (bodyLines.size * lineH * 0.9f) + 20f + lineH + padding
+
+        val saveCount = canvas.save()
+        if (spec.stepCardTitle == "1. Position Check" && stepCardScale != 1f) {
+            canvas.scale(
+                stepCardScale,
+                stepCardScale,
+                (cardLeft + cardRight) / 2f,
+                cardTop + cardH / 2f
+            )
+        }
 
         // Card background
         cardBgPaint.color = if (spec.stepCardBgColor != 0) spec.stepCardBgColor else Color.argb(210, 50, 50, 50)
@@ -338,6 +450,108 @@ class AROverlayView(context: Context) : View(context) {
             val ss = spec.elapsedSecs % 60
             canvas.drawText("Time: %02d:%02d".format(mm, ss), cardLeft + padding, counterTop + 98f, comprTimePaint)
         }
+        canvas.restoreToCount(saveCount)
+    }
+
+    private fun isPositionRed(color: Int): Boolean =
+        Color.red(color) == 185 && Color.green(color) == 40 && Color.blue(color) == 40
+
+    private fun isPositionGreen(color: Int): Boolean =
+        Color.red(color) == 34 && Color.green(color) == 139 && Color.blue(color) == 34
+
+    private fun startPositionReadyAnimation() {
+        val startAnimation = {
+            stepCardAnimator?.cancel()
+            stepCardAnimator = ValueAnimator.ofFloat(1f, 1.08f, 0.97f, 1f).apply {
+                duration = 400L
+                addUpdateListener { animator ->
+                    stepCardScale = animator.animatedValue as Float
+                    invalidate()
+                }
+                addListener(object : AnimatorListenerAdapter() {
+                    override fun onAnimationCancel(animation: Animator) {
+                        stepCardScale = 1f
+                        invalidate()
+                    }
+
+                    override fun onAnimationEnd(animation: Animator) {
+                        stepCardScale = 1f
+                        invalidate()
+                    }
+                })
+                start()
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) startAnimation() else post(startAnimation)
+    }
+
+    private fun updateCompressionSphereAnimation(spec: AROverlaySpec?) {
+        val shouldPulse = spec?.stepCardTitle == "5. Chest Compressions" &&
+            spec.statusColorGreen && spec.sternumTarget != null
+
+        val updateAnimation = {
+            if (shouldPulse) {
+                if (spherePulseAnimator == null) {
+                    spherePulseAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+                        duration = 250L
+                        repeatCount = ValueAnimator.INFINITE
+                        repeatMode = ValueAnimator.REVERSE
+                        addUpdateListener { animator ->
+                            spherePulseFraction = animator.animatedValue as Float
+                            invalidate()
+                        }
+                        start()
+                    }
+                }
+            } else {
+                spherePulseAnimator?.cancel()
+                spherePulseAnimator = null
+                spherePulseFraction = 0f
+                invalidate()
+            }
+        }
+
+        if (Looper.myLooper() == Looper.getMainLooper()) updateAnimation() else post(updateAnimation)
+    }
+
+    private fun updateHeartPulseAnimation(spec: AROverlaySpec?) {
+        val shouldPulse = spec != null && spec.showVitalsPanel && (spec.compressionRate ?: 0f) > 0f
+
+        val updateAnimation = {
+            if (shouldPulse) {
+                if (heartPulseAnimator == null) {
+                    // Pulse at ~75 BPM rhythm (800ms cycle) — slightly slower than compressions
+                    heartPulseAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+                        duration = 400L
+                        repeatCount = ValueAnimator.INFINITE
+                        repeatMode = ValueAnimator.REVERSE
+                        addUpdateListener { animator ->
+                            heartPulseFraction = animator.animatedValue as Float
+                            invalidate()
+                        }
+                        start()
+                    }
+                }
+            } else {
+                heartPulseAnimator?.cancel()
+                heartPulseAnimator = null
+                heartPulseFraction = 0f
+                invalidate()
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) updateAnimation() else post(updateAnimation)
+    }
+
+    override fun onDetachedFromWindow() {
+        stepCardAnimator?.cancel()
+        stepCardAnimator = null
+        spherePulseAnimator?.cancel()
+        spherePulseAnimator = null
+        spherePulseFraction = 0f
+        heartPulseAnimator?.cancel()
+        heartPulseAnimator = null
+        heartPulseFraction = 0f
+        super.onDetachedFromWindow()
     }
 
     // Simple word-wrap: split instruction into lines that fit within maxW pixels

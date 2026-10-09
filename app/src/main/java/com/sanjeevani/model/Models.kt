@@ -8,13 +8,22 @@ enum class EmergencyType { CPR, FAST_STROKE, HEART_ATTACK, ALLERGIC_REACTION, UN
 
 enum class SpatialAction {
     MOVE_LEFT, MOVE_RIGHT, MOVE_UP, MOVE_DOWN,
-    STACK_HANDS,                          // both hands detected but too far apart
     CORRECT, TRACKING_LOST, UNSURE
 }
 
 enum class RateStatus { TOO_SLOW, GOOD, TOO_FAST, INSUFFICIENT_DATA }
 
 enum class ConfidenceLevel { HIGH, MEDIUM, LOW, NONE }
+
+enum class VoiceUrgency { CALM, NORMAL, URGENT }
+
+data class VoiceSegment(
+    val text: String,
+    val urgency: VoiceUrgency = VoiceUrgency.NORMAL,
+    val pauseAfterMs: Long = 400L
+)
+
+data class VoiceScript(val segments: List<VoiceSegment>)
 
 enum class FSMState {
     IDLE,
@@ -160,6 +169,8 @@ data class GuidanceState(
     val confidence: ConfidenceState = ConfidenceState(),
     val overlay: AROverlaySpec = AROverlaySpec(),
     val voiceText: String? = null,
+    val voiceScript: VoiceScript? = null,
+    val voiceUrgency: VoiceUrgency = VoiceUrgency.NORMAL,
     val isPatientDetected: Boolean = false,
     val isRescuerDetected: Boolean = false,
     val triageState: TriageState = TriageState.OBSERVING,

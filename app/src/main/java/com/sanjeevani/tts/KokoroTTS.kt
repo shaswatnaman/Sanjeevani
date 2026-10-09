@@ -8,15 +8,24 @@ import com.k2fsa.sherpa.onnx.OfflineTts
 import com.k2fsa.sherpa.onnx.OfflineTtsConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
+import com.sanjeevani.model.VoiceScript
+import com.sanjeevani.model.VoiceSegment
+import com.sanjeevani.model.VoiceUrgency
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import java.util.zip.ZipInputStream
+
+private const val MAX_PLAYBACK_VOLUME = 1.0f
+private const val TARGET_GUIDANCE_PEAK = 0.94f
+private const val MAX_GUIDANCE_GAIN = 1.6f
 
 sealed class KokoroState {
     object Idle      : KokoroState()
@@ -31,8 +40,15 @@ class KokoroTTS(private val context: Context) {
     private val _state = MutableStateFlow<KokoroState>(KokoroState.Idle)
     val state: StateFlow<KokoroState> = _state
 
+    private val _isSpeaking = MutableStateFlow(false)
+    val isSpeaking: StateFlow<Boolean> = _isSpeaking
+
+    // Called on the IO thread when speaking starts (true) or ends (false).
+    var onSpeakingChanged: ((Boolean) -> Unit)? = null
+
     private var engine: OfflineTts? = null
     private var playTrack: AudioTrack? = null
+    private var currentJob: Job? = null
 
     // Coroutine scope tied to this instance
     private val scope = CoroutineScope(Dispatchers.IO)
@@ -108,19 +124,69 @@ class KokoroTTS(private val context: Context) {
         engine = OfflineTts(assetManager = null, config = config)
     }
 
-    // Speak asynchronously. Returns immediately; playback happens on IO thread.
-    fun speak(text: String) {
+    private fun speedFor(urgency: VoiceUrgency) = when (urgency) {
+        VoiceUrgency.CALM   -> 0.85f
+        VoiceUrgency.NORMAL -> 1.0f
+        VoiceUrgency.URGENT -> 1.15f
+    }
+
+    // Speak a single utterance asynchronously with optional urgency.
+    fun speak(text: String, urgency: VoiceUrgency = VoiceUrgency.NORMAL) {
         val eng = engine ?: return
-        scope.launch {
+        currentJob?.cancel()
+        currentJob = scope.launch {
+            setSpeaking(true)
             try {
-                val audio = eng.generate(text = text, sid = 0, speed = 1.0f)
-                play(audio.samples, audio.sampleRate)
-            } catch (_: Exception) { /* engine may have been released */ }
+                val audio = eng.generate(text = text, sid = 0, speed = speedFor(urgency))
+                if (!isActive) return@launch
+                play(boostForGuidance(audio.samples), audio.sampleRate)
+                // Estimate playback duration and wait so isSpeaking stays true
+                val durationMs = audio.samples.size.toLong() * 1000L / audio.sampleRate
+                delay(durationMs + 150L)
+            } catch (_: Exception) { }
+            finally { setSpeaking(false) }
         }
     }
 
+    // Speak a sequence of segments with pauses between them. Cancels any current speech.
+    fun speakScript(script: VoiceScript) {
+        val eng = engine ?: return
+        currentJob?.cancel()
+        currentJob = scope.launch {
+            setSpeaking(true)
+            try {
+                for (segment in script.segments) {
+                    if (!isActive) break
+                    val audio = eng.generate(text = segment.text, sid = 0, speed = speedFor(segment.urgency))
+                    if (!isActive) break
+                    play(boostForGuidance(audio.samples), audio.sampleRate)
+                    val durationMs = audio.samples.size.toLong() * 1000L / audio.sampleRate
+                    delay(durationMs + segment.pauseAfterMs)
+                }
+            } catch (_: Exception) { }
+            finally { setSpeaking(false) }
+        }
+    }
+
+    private fun setSpeaking(value: Boolean) {
+        _isSpeaking.value = value
+        onSpeakingChanged?.invoke(value)
+    }
+
     fun stop() {
+        currentJob?.cancel()
         playTrack?.stop()
+    }
+
+    // Kokoro output can be conservative in amplitude. Normalize quiet utterances toward
+    // a strong speech peak while limiting gain to avoid clipping or harsh distortion.
+    private fun boostForGuidance(samples: FloatArray): FloatArray {
+        val peak = samples.maxOfOrNull { kotlin.math.abs(it) } ?: return samples
+        if (peak <= 0f || peak >= TARGET_GUIDANCE_PEAK) return samples
+        val gain = (TARGET_GUIDANCE_PEAK / peak).coerceAtMost(MAX_GUIDANCE_GAIN)
+        return FloatArray(samples.size) { index ->
+            (samples[index] * gain).coerceIn(-1f, 1f)
+        }
     }
 
     private fun play(samples: FloatArray, sampleRate: Int) {
@@ -143,6 +209,7 @@ class KokoroTTS(private val context: Context) {
             .setBufferSizeInBytes(samples.size * 4)
             .build()
             .also { track ->
+                track.setVolume(MAX_PLAYBACK_VOLUME)
                 track.write(samples, 0, samples.size, AudioTrack.WRITE_BLOCKING)
                 track.play()
             }
