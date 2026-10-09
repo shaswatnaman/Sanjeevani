@@ -4,7 +4,7 @@ import android.graphics.PointF
 
 // ─── Enums ───────────────────────────────────────────────────────────────────
 
-enum class EmergencyType { CPR, FAST_STROKE, CHOKING, UNKNOWN }
+enum class EmergencyType { CPR, FAST_STROKE, HEART_ATTACK, ALLERGIC_REACTION, UNKNOWN }
 
 enum class SpatialAction {
     MOVE_LEFT, MOVE_RIGHT, MOVE_UP, MOVE_DOWN,
@@ -25,7 +25,17 @@ enum class FSMState {
     POSTURE_CHECK,
     COMPRESSION_ACTIVE,
     CPR_PAUSE,
-    CPR_SUCCESS
+    CPR_SUCCESS,
+    TRIAGE_DETECTION,
+    STROKE_FAST_TEST,
+    HEART_ATTACK_CONSCIOUS,
+    ALLERGIC_PROTOCOL
+}
+
+enum class TriageState { OBSERVING, CAMERA_SUGGESTS, USER_CONFIRMED }
+
+enum class AllergicPhase {
+    LAY_FLAT, RAISE_LEGS, SAFE_POSITION, EPIPEN_READY, EPIPEN_INJECT, MONITORING
 }
 
 // ─── Perception ──────────────────────────────────────────────────────────────
@@ -39,9 +49,9 @@ data class NormalizedLandmark(
 
 data class PerceptionFrame(
     val timestamp: Long,
-    val poseLandmarks: List<NormalizedLandmark>?,   // 33 body landmarks
-    val leftHandLandmarks: List<NormalizedLandmark>?,  // 21 landmarks
-    val rightHandLandmarks: List<NormalizedLandmark>?, // 21 landmarks
+    val poseLandmarks: List<NormalizedLandmark>?,
+    val leftHandLandmarks: List<NormalizedLandmark>?,
+    val rightHandLandmarks: List<NormalizedLandmark>?,
     val imageWidth: Int,
     val imageHeight: Int
 )
@@ -70,6 +80,35 @@ data class ConfidenceState(
     val overall: ConfidenceLevel = ConfidenceLevel.NONE
 )
 
+// ─── Classifier ──────────────────────────────────────────────────────────────
+
+data class ClassifierSignal(
+    val emergencyType: EmergencyType,
+    val confidence: Float,
+    val visualSignals: List<String>,
+    val suggestedByCamera: Boolean
+)
+
+data class StrokeSignals(
+    val faceAsymmetryScore: Float,
+    val armDriftDetected: Boolean,
+    val speechPrompted: Boolean,
+    val positiveTestCount: Int
+)
+
+// ─── Emergency module contract ───────────────────────────────────────────────
+
+data class ModuleResult(
+    val voiceText: String?,
+    val overlay: AROverlaySpec,
+    val isComplete: Boolean = false
+)
+
+interface EmergencyModule {
+    fun process(frame: PerceptionFrame, nowMs: Long): ModuleResult
+    fun reset()
+}
+
 // ─── Guidance ────────────────────────────────────────────────────────────────
 
 data class AROverlaySpec(
@@ -82,7 +121,13 @@ data class AROverlaySpec(
     val statusColorGreen: Boolean = false,
     val compressionRate: Float? = null,
     val skeletonLines: List<Pair<PointF, PointF>> = emptyList(),
-    val guidanceText: String = ""
+    val guidanceText: String = "",
+    // Multi-emergency fields
+    val emergencyType: EmergencyType = EmergencyType.UNKNOWN,
+    val phaseProgress: Float = 0f,
+    val showEpiPenMarker: Boolean = false,
+    val leftShoulderY: Float = 0f,
+    val rightShoulderY: Float = 0f
 )
 
 data class GuidanceState(
@@ -94,5 +139,7 @@ data class GuidanceState(
     val overlay: AROverlaySpec = AROverlaySpec(),
     val voiceText: String? = null,
     val isPatientDetected: Boolean = false,
-    val isRescuerDetected: Boolean = false
+    val isRescuerDetected: Boolean = false,
+    val triageState: TriageState = TriageState.OBSERVING,
+    val classifierSignal: ClassifierSignal? = null
 )
