@@ -18,6 +18,7 @@ class SanjeevaniEngine {
     private val classifier = EmergencyClassifier()
     private val allergicModule = AllergicReactionModule()
     private val strokeModule = StrokeModule()
+    private val heartAttackModule = HeartAttackModule()
 
     private var lastVoiceText: String? = null
     private var lastVoiceTs = 0L
@@ -108,8 +109,9 @@ class SanjeevaniEngine {
         // ── Module dispatch ────────────────────────────────────────────────────
         val confirmedType = emergencyFSM.getConfirmedEmergencyType()
         val moduleResult: ModuleResult? = when (transition.newState) {
-            FSMState.ALLERGIC_PROTOCOL    -> allergicModule.process(frame, nowMs)
-            FSMState.STROKE_FAST_TEST     -> strokeModule.process(frame, nowMs)
+            FSMState.ALLERGIC_PROTOCOL      -> allergicModule.process(frame, nowMs)
+            FSMState.STROKE_FAST_TEST       -> strokeModule.process(frame, nowMs)
+            FSMState.HEART_ATTACK_CONSCIOUS -> heartAttackModule.process(frame, nowMs)
             else -> null
         }
 
@@ -222,6 +224,7 @@ class SanjeevaniEngine {
         // Reset modules that weren't selected
         if (type != EmergencyType.ALLERGIC_REACTION) allergicModule.reset()
         if (type != EmergencyType.FAST_STROKE) strokeModule.reset()
+        if (type != EmergencyType.HEART_ATTACK) heartAttackModule.reset()
     }
 
     fun onStrokeSpeechResult(positive: Boolean) = strokeModule.onSpeechResult(positive)

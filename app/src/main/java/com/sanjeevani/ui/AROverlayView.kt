@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.*
 import android.view.View
 import com.sanjeevani.model.AROverlaySpec
+import com.sanjeevani.model.EmergencyType
 
 class AROverlayView(context: Context) : View(context) {
 
@@ -49,10 +50,40 @@ class AROverlayView(context: Context) : View(context) {
     private val rateBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.argb(160, 0, 0, 0); style = Paint.Style.FILL
     }
+    private val badgePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+    private val badgeTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE; textSize = 32f; typeface = Typeface.DEFAULT_BOLD
+    }
+    private val progressBarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+    private val progressTrackPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(80, 255, 255, 255); style = Paint.Style.FILL
+    }
+    private val epiPenPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(255, 140, 0); style = Paint.Style.STROKE; strokeWidth = 6f
+    }
+    private val epiPenFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(60, 255, 140, 0); style = Paint.Style.FILL
+    }
+    private val shoulderBarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE; strokeWidth = 5f; strokeCap = Paint.Cap.ROUND
+    }
+
+    private var epiPenPulseRadius = 40f
+    private var epiPenPulseGrowing = true
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val spec = overlaySpec ?: return
+
+        // ── Multi-emergency overlays (drawn first, behind CPR elements) ────────
+        drawEmergencyBadge(canvas, spec)
+        drawEpiPenMarker(canvas, spec)
+        drawPhaseProgressBar(canvas, spec)
+        drawStrokeAsymmetryBars(canvas, spec)
 
         // ── Skeleton ─────────────────────────────────────────────────────────
         spec.skeletonLines.forEach { (from, to) ->
@@ -113,6 +144,92 @@ class AROverlayView(context: Context) : View(context) {
             }
             canvas.drawText(bpmText, bx + 20f, by, ratePaint)
         }
+    }
+
+    private fun emergencyColor(type: EmergencyType): Int = when (type) {
+        EmergencyType.FAST_STROKE       -> Color.rgb(167, 139, 250)
+        EmergencyType.HEART_ATTACK      -> Color.rgb(249, 115, 22)
+        EmergencyType.ALLERGIC_REACTION -> Color.rgb(78, 204, 168)
+        else -> Color.TRANSPARENT
+    }
+
+    private fun drawEmergencyBadge(canvas: Canvas, spec: AROverlaySpec) {
+        val type = spec.emergencyType
+        if (type == EmergencyType.UNKNOWN || type == EmergencyType.CPR) return
+        val color = emergencyColor(type)
+        val label = when (type) {
+            EmergencyType.FAST_STROKE       -> "STROKE"
+            EmergencyType.HEART_ATTACK      -> "HEART ATTACK"
+            EmergencyType.ALLERGIC_REACTION -> "ALLERGIC"
+            else -> return
+        }
+        val tw = badgeTextPaint.measureText(label)
+        val padding = 20f; val pillH = 52f
+        val left = 16f; val top = 110f
+        val right = left + tw + padding * 2f
+        val bottom = top + pillH
+        badgePaint.color = Color.argb(220, Color.red(color), Color.green(color), Color.blue(color))
+        canvas.drawRoundRect(left, top, right, bottom, pillH / 2f, pillH / 2f, badgePaint)
+        canvas.drawText(label, left + padding, top + pillH * 0.68f, badgeTextPaint)
+    }
+
+    private fun drawEpiPenMarker(canvas: Canvas, spec: AROverlaySpec) {
+        if (!spec.showEpiPenMarker) return
+        val target = spec.sternumTarget ?: return
+        val px = target.x * width
+        val py = target.y * height
+
+        // Pulsing animation
+        if (epiPenPulseGrowing) {
+            epiPenPulseRadius += 2f
+            if (epiPenPulseRadius > 70f) epiPenPulseGrowing = false
+        } else {
+            epiPenPulseRadius -= 2f
+            if (epiPenPulseRadius < 35f) epiPenPulseGrowing = true
+        }
+
+        canvas.drawCircle(px, py, epiPenPulseRadius, epiPenFillPaint)
+        canvas.drawCircle(px, py, epiPenPulseRadius, epiPenPaint)
+        postInvalidateOnAnimation()
+    }
+
+    private fun drawPhaseProgressBar(canvas: Canvas, spec: AROverlaySpec) {
+        val progress = spec.phaseProgress
+        if (progress <= 0f) return
+        val barY = height * 0.85f
+        val barH = 10f
+        val color = emergencyColor(spec.emergencyType)
+        if (color == Color.TRANSPARENT) return
+
+        canvas.drawRoundRect(0f, barY, width.toFloat(), barY + barH, barH / 2f, barH / 2f, progressTrackPaint)
+        progressBarPaint.color = color
+        val fillWidth = (width * progress).coerceAtLeast(0f)
+        if (fillWidth > 0f) {
+            canvas.drawRoundRect(0f, barY, fillWidth, barY + barH, barH / 2f, barH / 2f, progressBarPaint)
+        }
+    }
+
+    private fun drawStrokeAsymmetryBars(canvas: Canvas, spec: AROverlaySpec) {
+        if (spec.emergencyType != EmergencyType.FAST_STROKE) return
+        val lsy = spec.leftShoulderY; val rsy = spec.rightShoulderY
+        if (lsy == 0f && rsy == 0f) return
+
+        val color = emergencyColor(EmergencyType.FAST_STROKE)
+        shoulderBarPaint.color = Color.argb(180, Color.red(color), Color.green(color), Color.blue(color))
+
+        val barTop = height * 0.3f; val barBottom = height * 0.7f
+        // Left shoulder column
+        val lx = width * 0.25f
+        canvas.drawLine(lx, barTop, lx, barBottom, shoulderBarPaint)
+        // Marker at shoulder Y
+        val lyPx = lsy * height
+        canvas.drawCircle(lx, lyPx, 12f, shoulderBarPaint)
+
+        // Right shoulder column
+        val rx = width * 0.75f
+        canvas.drawLine(rx, barTop, rx, barBottom, shoulderBarPaint)
+        val ryPx = rsy * height
+        canvas.drawCircle(rx, ryPx, 12f, shoulderBarPaint)
     }
 
     private fun drawArrowHead(canvas: Canvas, x1: Float, y1: Float, x2: Float, y2: Float) {

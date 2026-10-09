@@ -6,8 +6,8 @@ import android.speech.tts.TextToSpeech
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.sanjeevani.engine.SanjeevaniEngine
+import com.sanjeevani.model.EmergencyType
 import com.sanjeevani.model.GuidanceState
-import com.sanjeevani.model.FSMState
 import com.sanjeevani.perception.MediaPipeController
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -25,9 +25,16 @@ class SanjeevaniViewModel : ViewModel() {
 
     private var lastSpokenText = ""
     private var lastSpokenTs = 0L
-    private val MIN_VOICE_INTERVAL_MS = 2500L
+    private var isInitialized = false
 
-    fun initialize(context: Context) {
+    fun ensureInitialized(context: Context) {
+        if (!isInitialized) {
+            isInitialized = true
+            initialize(context)
+        }
+    }
+
+    private fun initialize(context: Context) {
         mediaPipe = MediaPipeController(context).also { it.initialize() }
 
         tts = TextToSpeech(context) { status ->
@@ -56,8 +63,20 @@ class SanjeevaniViewModel : ViewModel() {
         engine.confirmNoResponse(System.currentTimeMillis())
     }
 
+    fun onEmergencySelected(type: EmergencyType) {
+        engine.setUserSelectedEmergency(type)
+    }
+
+    fun onStrokeSpeechResult(positive: Boolean) {
+        engine.onStrokeSpeechResult(positive)
+    }
+
     private fun speak(text: String, nowMs: Long) {
-        if (text == lastSpokenText && nowMs - lastSpokenTs < MIN_VOICE_INTERVAL_MS) return
+        val interval = when (_guidanceState.value.emergencyType) {
+            EmergencyType.ALLERGIC_REACTION, EmergencyType.HEART_ATTACK -> 5000L
+            else -> 2500L
+        }
+        if (text == lastSpokenText && nowMs - lastSpokenTs < interval) return
         lastSpokenText = text
         lastSpokenTs = nowMs
         tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "sanjeevani_$nowMs")

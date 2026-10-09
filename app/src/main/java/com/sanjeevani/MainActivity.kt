@@ -25,9 +25,11 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.sanjeevani.model.EmergencyType
 import com.sanjeevani.model.FSMState
 import com.sanjeevani.model.GuidanceState
 import com.sanjeevani.ui.AROverlayView
+import com.sanjeevani.ui.EmergencySelectionScreen
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -39,17 +41,19 @@ class MainActivity : ComponentActivity() {
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
-        if (granted) startCamera()
+        if (granted) {
+            viewModel.ensureInitialized(applicationContext)
+            startCamera()
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         cameraExecutor = Executors.newSingleThreadExecutor()
-        viewModel.initialize(applicationContext)
-
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
             == PackageManager.PERMISSION_GRANTED
         ) {
+            viewModel.ensureInitialized(applicationContext)
             startCamera()
         } else {
             requestPermissionLauncher.launch(Manifest.permission.CAMERA)
@@ -62,11 +66,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    internal var previewView: PreviewView? = null
+
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
         cameraProviderFuture.addListener({
             val cameraProvider = cameraProviderFuture.get()
-            val preview = Preview.Builder().build()
+            val preview = Preview.Builder().build().also { p ->
+                previewView?.let { p.setSurfaceProvider(it.surfaceProvider) }
+            }
             val imageAnalysis = ImageAnalysis.Builder()
                 .setTargetResolution(Size(720, 1280))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -92,7 +100,6 @@ class MainActivity : ComponentActivity() {
                     preview,
                     imageAnalysis
                 )
-                // Preview surface is set via AndroidView in Compose — see SanjeevaniScreen
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -118,13 +125,15 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun SanjeevaniScreen(viewModel: SanjeevaniViewModel) {
     val guidance by viewModel.guidanceState.collectAsStateWithLifecycle()
+    val activity = androidx.compose.ui.platform.LocalContext.current as? MainActivity
 
     Box(modifier = Modifier.fillMaxSize()) {
-        // Camera preview
+        // Camera preview — fix: setSurfaceProvider wired via activity reference
         AndroidView(
             factory = { ctx ->
                 PreviewView(ctx).apply {
                     implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                    activity?.previewView = this
                 }
             },
             modifier = Modifier.fillMaxSize()
@@ -184,12 +193,48 @@ fun SanjeevaniScreen(viewModel: SanjeevaniViewModel) {
                 Text("No Response — Start CPR Guidance", color = Color.White, fontSize = 16.sp)
             }
         }
+
+        // Triage screen (fullscreen overlay, auto-dismisses when FSM leaves TRIAGE_DETECTION)
+        if (guidance.fsmState == FSMState.TRIAGE_DETECTION) {
+            EmergencySelectionScreen(
+                classifierSuggestion = guidance.classifierSignal?.emergencyType,
+                classifierConfidence = guidance.classifierSignal?.confidence ?: 0f,
+                onEmergencySelected = { type -> viewModel.onEmergencySelected(type) }
+            )
+        }
+
+        // Stroke speech buttons (shown during FAST speech step)
+        if (guidance.fsmState == FSMState.STROKE_FAST_TEST) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(horizontal = 16.dp, vertical = 40.dp)
+                    .fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Button(
+                    onClick = { viewModel.onStrokeSpeechResult(true) },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF22C55E)),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("✓ Speech Clear", color = Color.White, fontSize = 14.sp)
+                }
+                Button(
+                    onClick = { viewModel.onStrokeSpeechResult(false) },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("✗ Speech Slurred", color = Color.White, fontSize = 14.sp)
+                }
+            }
+        }
     }
 }
 
 private fun stateLabel(state: FSMState): String = when (state) {
     FSMState.IDLE -> "Scanning"
     FSMState.SCENE_ASSESSMENT -> "Emergency detected"
+    FSMState.TRIAGE_DETECTION -> "Select emergency"
     FSMState.RESPONSIVENESS_CHECK -> "Check response"
     FSMState.EMERGENCY_ESCALATION -> "Call 112 now"
     FSMState.CPR_POSITIONING -> "Position rescuer"
@@ -198,4 +243,7 @@ private fun stateLabel(state: FSMState): String = when (state) {
     FSMState.COMPRESSION_ACTIVE -> "CPR Active"
     FSMState.CPR_PAUSE -> "Paused"
     FSMState.CPR_SUCCESS -> "Done"
+    FSMState.STROKE_FAST_TEST -> "FAST Test"
+    FSMState.HEART_ATTACK_CONSCIOUS -> "Heart Attack"
+    FSMState.ALLERGIC_PROTOCOL -> "Allergic Reaction"
 }
