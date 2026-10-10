@@ -63,7 +63,8 @@ class AllergicReactionModule : EmergencyModule {
             phaseProgress = progress,
             showEpiPenMarker = currentPhase == AllergicPhase.EPIPEN_READY ||
                                currentPhase == AllergicPhase.EPIPEN_INJECT,
-            sternumTarget = frame.poseLandmarks?.let { sternumOf(it) },
+            thighTarget = frame.poseLandmarks?.let { rightThighOf(it) },
+            // sternumTarget intentionally null: sternum sphere is for CPR only
             leftShoulderY = lsy,
             rightShoulderY = rsy
         )
@@ -104,14 +105,12 @@ class AllergicReactionModule : EmergencyModule {
         AllergicPhase.MONITORING    -> "Monitoring"
     }
 
-    private fun sternumOf(pose: List<NormalizedLandmark>): PointF? {
-        if (pose.size < 25) return null
-        val ls = pose[11]; val rs = pose[12]
-        val lh = pose[23]; val rh = pose[24]
-        if (ls.visibility < 0.4f || rs.visibility < 0.4f) return null
-        val shoulderMidX = (ls.x + rs.x) / 2f
-        val shoulderMidY = (ls.y + rs.y) / 2f
-        val hipMidY = (lh.y + rh.y) / 2f
-        return PointF(shoulderMidX, shoulderMidY + (hipMidY - shoulderMidY) * 0.35f)
+    // Right outer thigh midpoint: between right hip (24) and right knee (26).
+    // Matches HALO's right_upLeg_joint injection site.
+    private fun rightThighOf(pose: List<NormalizedLandmark>): PointF? {
+        if (pose.size < 27) return null
+        val hip = pose[24]; val knee = pose[26]
+        if (hip.visibility < 0.4f || knee.visibility < 0.4f) return null
+        return PointF((hip.x + knee.x) / 2f, (hip.y + knee.y) / 2f)
     }
 }

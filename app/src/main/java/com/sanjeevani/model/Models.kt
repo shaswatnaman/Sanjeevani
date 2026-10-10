@@ -163,6 +163,7 @@ data class AROverlaySpec(
     val emergencyType: EmergencyType = EmergencyType.UNKNOWN,
     val phaseProgress: Float = 0f,
     val showEpiPenMarker: Boolean = false,
+    val thighTarget: PointF? = null,  // right outer thigh — EpiPen injection site
     val leftShoulderY: Float = 0f,
     val rightShoulderY: Float = 0f,
     val state: FSMState = FSMState.IDLE,

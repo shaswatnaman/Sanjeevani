@@ -615,11 +615,15 @@ class AROverlayView(context: Context) : View(context) {
 
     private fun drawEpiPenMarker(canvas: Canvas, spec: AROverlaySpec) {
         if (!spec.showEpiPenMarker) return
-        val target = spec.sternumTarget ?: return
+        val target = spec.thighTarget ?: return   // right outer thigh, per HALO right_upLeg_joint
         val px = sx(target.x)
         val py = sy(target.y)
 
-        // Pulsing animation
+        // Green = "locate injection site" (EPIPEN_READY); red = "inject now" (EPIPEN_INJECT)
+        val inject = spec.statusText.contains("Inject", ignoreCase = true)
+        epiPenPaint.color = if (inject) Color.rgb(220, 40, 40) else Color.rgb(50, 220, 100)
+        epiPenFillPaint.color = if (inject) Color.argb(60, 220, 40, 40) else Color.argb(60, 50, 220, 100)
+
         if (epiPenPulseGrowing) {
             epiPenPulseRadius += 2f
             if (epiPenPulseRadius > 70f) epiPenPulseGrowing = false
@@ -630,6 +634,14 @@ class AROverlayView(context: Context) : View(context) {
 
         canvas.drawCircle(px, py, epiPenPulseRadius, epiPenFillPaint)
         canvas.drawCircle(px, py, epiPenPulseRadius, epiPenPaint)
+
+        // "X" crosshair: two short lines through centre, matching HALO's X marker appearance
+        val arm = epiPenPulseRadius * 0.55f
+        epiPenPaint.strokeWidth = 8f
+        canvas.drawLine(px - arm, py - arm, px + arm, py + arm, epiPenPaint)
+        canvas.drawLine(px + arm, py - arm, px - arm, py + arm, epiPenPaint)
+        epiPenPaint.strokeWidth = 6f  // restore default
+
         postInvalidateOnAnimation()
     }
 

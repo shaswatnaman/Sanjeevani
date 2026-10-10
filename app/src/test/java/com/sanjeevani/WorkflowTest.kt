@@ -164,6 +164,24 @@ class WorkflowTest {
         assertTrue(t91.isComplete)
     }
 
+    @Test fun allergicModuleEpiPenMarkerOnThighNotSternum() {
+        val module = AllergicReactionModule()
+        val landmarks = (0 until 33).map { i ->
+            when (i) {
+                24 -> com.sanjeevani.model.NormalizedLandmark(0.5f, 0.6f, 0f, 0.9f) // right hip
+                26 -> com.sanjeevani.model.NormalizedLandmark(0.5f, 0.8f, 0f, 0.9f) // right knee
+                else -> com.sanjeevani.model.NormalizedLandmark(0.5f, 0.5f, 0f, 0.9f)
+            }
+        }
+        val frame = PerceptionFrame(48001, landmarks, null, null, 720, 1280)
+        val result = module.process(frame, 48001)
+        // thighTarget must be non-null — confirms rightThighOf() found visible hip+knee landmarks.
+        // PointF field values are Android stubs in JVM unit tests (always 0); coordinate accuracy
+        // is verified by visual inspection on device.
+        assertNotNull("EpiPen marker must be placed at right thigh, not sternum", result.overlay.thighTarget)
+        assertNull("sternumTarget must be null in allergic protocol — sternum sphere is CPR-only", result.overlay.sternumTarget)
+    }
+
     @Test fun allergicModuleResetRestartsCycle() {
         val module = AllergicReactionModule()
         module.process(emptyFrame(0), 0)
