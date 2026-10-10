@@ -277,6 +277,9 @@ class SanjeevaniViewModel : ViewModel() {
     fun onEmergencySelected(type: EmergencyType) {
         cancelTurn(); engine.setUserSelectedEmergency(type); publish(engine.snapshot())
     }
+    fun resetForNewEmergency() {
+        cancelTurn(); engine.resetForNewEmergency(); _guidanceState.value = GuidanceState()
+    }
     fun confirmNoResponse() = answer(Answer.NO)
     fun onStrokeSpeechResult(positive: Boolean) { engine.onStrokeSpeechResult(positive) }
     fun onResponsivenessCheckEntered() { /* Entry speech belongs to engine version, never UI recomposition. */ }

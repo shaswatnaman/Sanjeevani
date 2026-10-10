@@ -19,6 +19,7 @@ class SanjeevaniEngine {
     private val spatialReasoner = SpatialReasoner()
     private val patientDetector = PatientDetector()
     private val compressionDetector = CompressionDetector()
+    private val allergicModule = AllergicReactionModule()
     private var latest = GuidanceState()
     private var frame: PerceptionFrame? = null
     private var lastPoseTimestamp = -1L
@@ -34,6 +35,8 @@ class SanjeevaniEngine {
     private var frozenSternumTarget: PointF? = null
     private var pendingResponseCheck = false
     private var responseVoiceOverride: String? = null
+    private var pendingAllergicVoice: String? = null
+    private var latestAllergicOverlay: AROverlaySpec? = null
     private var visionAfter = 0L
     private var reportedConcern = ""
     private val answers = ArrayDeque<DialogueEvidence>()
@@ -103,6 +106,13 @@ class SanjeevaniEngine {
         val temporal = compressionDetector.getTemporalState(input.timestamp)
         latest = latest.copy(spatial = spatial, temporal = temporal, confidence = confidence,
             isPatientDetected = patient.first)
+        // Allergic reaction: timer-based phase progression with camera-anchored AR overlays.
+        // Process every frame so the module's startMs anchors to real wall-clock time.
+        if (state == FSMState.ALLERGIC_PROTOCOL) {
+            val result = allergicModule.process(safeFrame, input.timestamp)
+            if (result.voiceText != null) pendingAllergicVoice = result.voiceText
+            latestAllergicOverlay = result.overlay
+        }
         return snapshot(input.timestamp)
     }
 
@@ -118,6 +128,10 @@ class SanjeevaniEngine {
                 pendingResponseCheck = false; responseVoiceOverride = null
                 latest = latest.copy(temporal = TemporalState())
             }
+            if (state == FSMState.ALLERGIC_PROTOCOL) {
+                // Module owns all phase voice; reset so it starts clean from this entry.
+                allergicModule.reset(); pendingAllergicVoice = null; latestAllergicOverlay = null
+            }
         }
         fsm.history.filter { it.version > transitionLogged }.forEach {
             Log.i("SanjeevaniFSM", "${it.timestamp} ${it.from} -> ${it.to} v${it.version}: ${it.reason}")
@@ -126,6 +140,10 @@ class SanjeevaniEngine {
         val spatial = latest.spatial
         val temporal = latest.temporal
         if (voice == null) responseVoiceOverride?.let { voice = it; responseVoiceOverride = null }
+        // Allergic reaction phase voice: fires once per phase transition (timer-driven).
+        if (voice == null && state == FSMState.ALLERGIC_PROTOCOL) {
+            pendingAllergicVoice?.let { voice = it; pendingAllergicVoice = null }
+        }
         if (voice == null && state == FSMState.COMPRESSION_ACTIVE && temporal.trackingReliable &&
             nowMs - paceVoiceTs >= (if (temporal.rateStatus == RateStatus.TOO_SLOW) 2000L else 4000L)) {
             voice = when {
@@ -151,6 +169,29 @@ class SanjeevaniEngine {
             }
             if (voice != null) lastCorrectionTs = nowMs
         }
+        // Allergic reaction: return a complete overlay built from the module's latest result.
+        if (state == FSMState.ALLERGIC_PROTOCOL) {
+            val base = latestAllergicOverlay ?: AROverlaySpec(emergencyType = EmergencyType.ALLERGIC_REACTION)
+            val phaseTitle = base.statusText.takeIf { it.isNotEmpty() } ?: "Allergic Reaction"
+            val allergicOverlay = base.copy(
+                skeletonLines = buildSkeletonLines(frame?.poseLandmarks),
+                jointPoints = buildJointPoints(frame?.poseLandmarks),
+                stepCardTitle = phaseTitle,
+                stepCardInstruction = base.guidanceText.takeIf { it.isNotEmpty() } ?: fsm.instruction(),
+                stepCardStatus = "Follow on-screen guidance",
+                stepCardBgColor = if (base.statusColorGreen) android.graphics.Color.rgb(34, 139, 34)
+                    else android.graphics.Color.rgb(185, 40, 40),
+                showCPRBadge = false,
+                state = state,
+                imageWidth = frame?.imageWidth ?: 1,
+                imageHeight = frame?.imageHeight ?: 1
+            )
+            latest = latest.copy(fsmState = state, emergencyType = EmergencyType.ALLERGIC_REACTION,
+                overlay = allergicOverlay, voiceText = voice, stateVersion = fsm.version,
+                triageState = TriageState.USER_CONFIRMED)
+            return latest
+        }
+
         val title = when (state) {
             FSMState.CPR_POSITIONING, FSMState.POSITION_CONFIRMED -> "1. Position Check"
             FSMState.HAND_POSITIONING -> "3. Hand Placement"
@@ -233,8 +274,31 @@ class SanjeevaniEngine {
         responseVoiceOverride = null
         spatialReasoner.reset()
         compressionDetector.trackingLost()
+        // For allergic reaction, the module timer continues even when camera is unavailable.
+        // Clear only the pending voice to avoid re-announcing on resume.
+        if (fsm.getState() == FSMState.ALLERGIC_PROTOCOL) pendingAllergicVoice = null
         latest = latest.copy(spatial = SpatialState(correctiveAction = SpatialAction.TRACKING_LOST),
             temporal = compressionDetector.getTemporalState(visionAfter))
+    }
+
+    /** Reset the engine and FSM to IDLE so a new training session can be selected. */
+    fun resetForNewEmergency() {
+        allergicModule.reset()
+        pendingAllergicVoice = null
+        latestAllergicOverlay = null
+        compressionDetector.trackingLost()
+        spatialReasoner.reset()
+        frozenSternumTarget = null
+        pendingResponseCheck = false
+        responseVoiceOverride = null
+        visionAfter = SystemClock.elapsedRealtime()
+        announcedVersion = -1L
+        lastCorrectionTs = -10000L
+        paceVoiceTs = -10000L
+        milestone = 0
+        activeSince = 0L
+        latest = GuidanceState()
+        fsm.resetForNewSession(SystemClock.elapsedRealtime())
     }
     fun confirmNoResponse() { answer(Answer.NO) }
     fun onPatientResponsive() { answer(Answer.YES) }

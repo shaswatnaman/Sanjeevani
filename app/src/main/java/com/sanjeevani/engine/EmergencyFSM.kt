@@ -46,6 +46,8 @@ class EmergencyFSM {
             else "They are breathing normally. Follow the dispatcher about positioning them safely. Watch their breathing. Tell me if their condition changes."
         FSMState.CPR_SUCCESS -> "Let the emergency team take over. Follow their instructions."
         FSMState.CPR_PAUSE -> "Follow the emergency dispatcher. Tap resume when you want app guidance."
+        FSMState.ALLERGIC_PROTOCOL ->
+            "Anaphylaxis protocol. Call one one two now. Follow the on-screen guidance and voice instructions."
         else -> "Call one one two now. Follow the emergency dispatcher's instructions."
     }
     fun expectsAnswer() = state in setOf(FSMState.IDLE, FSMState.SCENE_ASSESSMENT,
@@ -55,8 +57,25 @@ class EmergencyFSM {
     fun setUserSelectedEmergency(selected: EmergencyType, nowMs: Long) {
         if (state !in setOf(FSMState.IDLE, FSMState.SCENE_ASSESSMENT, FSMState.TRIAGE_DETECTION)) return
         type = selected
-        if (selected == EmergencyType.UNKNOWN) transition(FSMState.TRIAGE_DETECTION, nowMs, "selection fallback")
-        else transition(FSMState.RESPONSIVENESS_CHECK, nowMs, "reported concern: $selected; diagnosis not inferred")
+        when (selected) {
+            EmergencyType.UNKNOWN -> transition(FSMState.TRIAGE_DETECTION, nowMs, "selection fallback")
+            EmergencyType.ALLERGIC_REACTION -> transition(FSMState.ALLERGIC_PROTOCOL, nowMs,
+                "allergic reaction selected; begin anaphylaxis protocol")
+            else -> transition(FSMState.RESPONSIVENESS_CHECK, nowMs,
+                "reported concern: $selected; diagnosis not inferred")
+        }
+    }
+
+    fun resetForNewSession(nowMs: Long) {
+        val prev = state
+        state = FSMState.IDLE
+        type = EmergencyType.UNKNOWN
+        version++
+        responding = null; breathingNormally = null
+        lastAnswer = null; stableSince = null; lastObservation = -1L
+        completed.clear()
+        history.add(TransitionRecord(nowMs, prev, FSMState.IDLE,
+            "user navigated back; reset for new session", version))
     }
 
     fun answer(answer: Answer, nowMs: Long, expectedVersion: Long = version): Boolean {

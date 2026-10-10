@@ -44,7 +44,6 @@ import androidx.compose.ui.zIndex
 import com.sanjeevani.llm.LlmState
 import com.sanjeevani.tts.KokoroState
 import com.sanjeevani.ui.AROverlayView
-import com.sanjeevani.ui.AllergicReactionTrainingScreen
 import com.sanjeevani.ui.EmergencySelectionScreen
 import com.sanjeevani.ui.TrainingHomeScreen
 import java.util.concurrent.ExecutorService
@@ -100,7 +99,14 @@ class MainActivity : ComponentActivity() {
                         SanjeevaniScreen(viewModel)
                     }
                     "allergy" -> {
-                        AllergicReactionTrainingScreen(onBack = { destination = "home" })
+                        BackHandler {
+                            viewModel.resetForNewEmergency()
+                            destination = "home"
+                        }
+                        LaunchedEffect(Unit) {
+                            viewModel.onEmergencySelected(EmergencyType.ALLERGIC_REACTION)
+                        }
+                        SanjeevaniScreen(viewModel)
                     }
                 }
             }
@@ -327,10 +333,18 @@ fun SanjeevaniScreen(viewModel: SanjeevaniViewModel) {
                         })
                     }
                 }
-                if (state == FSMState.HEART_ATTACK_CONSCIOUS || state == FSMState.COMPRESSION_ACTIVE) {
+                if (state == FSMState.HEART_ATTACK_CONSCIOUS || state == FSMState.COMPRESSION_ACTIVE ||
+                    state == FSMState.ALLERGIC_PROTOCOL) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = { viewModel.answer(Answer.CHANGED, answerVersion) }, modifier = Modifier.weight(1f)) { Text("Condition changed") }
-                        Button(onClick = { viewModel.answer(Answer.HELP_ARRIVED, answerVersion) }, modifier = Modifier.weight(1f)) { Text("Team taking over") }
+                        if (state == FSMState.ALLERGIC_PROTOCOL) {
+                            Button(onClick = { viewModel.answer(Answer.HELP_ARRIVED, answerVersion) },
+                                modifier = Modifier.weight(1f)) { Text("Emergency team arrived") }
+                        } else {
+                            Button(onClick = { viewModel.answer(Answer.CHANGED, answerVersion) },
+                                modifier = Modifier.weight(1f)) { Text("Condition changed") }
+                            Button(onClick = { viewModel.answer(Answer.HELP_ARRIVED, answerVersion) },
+                                modifier = Modifier.weight(1f)) { Text("Team taking over") }
+                        }
                     }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

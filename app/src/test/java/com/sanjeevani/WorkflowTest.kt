@@ -136,6 +136,14 @@ class WorkflowTest {
         assertFalse(f.answer(result.answer,1100))
         assertTrue(SessionDialogue.help("how fast",f.getState(),f.instruction()).contains("responding"))
     }
+    @Test fun allergicReactionSelectsAllergicProtocol() {
+        val f = EmergencyFSM()
+        f.setUserSelectedEmergency(EmergencyType.ALLERGIC_REACTION, 1000)
+        assertEquals(FSMState.ALLERGIC_PROTOCOL, f.getState())
+        assertEquals(EmergencyType.ALLERGIC_REACTION, f.getConfirmedEmergencyType())
+        assertTrue(f.history.last().reason.contains("anaphylaxis", ignoreCase = true))
+    }
+
     @Test fun allergicModuleAdvancesThroughPhases() {
         val module = AllergicReactionModule()
         // t=0: LAY_FLAT
