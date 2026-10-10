@@ -395,14 +395,14 @@ fun SanjeevaniScreen(viewModel: SanjeevaniViewModel, onReturnHome: (() -> Unit)?
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Button(
-                        onClick = { viewModel.onStrokeSpeechResult(true) },
+                        onClick = { viewModel.onStrokeSpeechResult(false) },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF22C55E)),
                         modifier = Modifier.weight(1f)
                     ) {
                         Text("✓ Speech Clear", color = Color.White, fontSize = 14.sp)
                     }
                     Button(
-                        onClick = { viewModel.onStrokeSpeechResult(false) },
+                        onClick = { viewModel.onStrokeSpeechResult(true) },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)),
                         modifier = Modifier.weight(1f)
                     ) {

@@ -45,7 +45,12 @@ class StrokeModule : EmergencyModule {
                 if (stepElapsed > STEP_DURATION_MS[FastStep.ARM]!!) advanceStep(nowMs)
             }
             FastStep.SPEECH -> {
-                // Waits for onSpeechResult() — no time limit
+                // 45 s timeout auto-advances if user forgets to tap a speech button
+                if (!speechInputReceived && stepElapsed > 45_000L) {
+                    speechInputReceived = true
+                    speechPositive = false
+                    advanceStep(nowMs)
+                }
             }
             FastStep.RESULT -> {
                 // Terminal state
@@ -128,9 +133,9 @@ class StrokeModule : EmergencyModule {
         FastStep.RESULT  -> {
             val n = countPositives()
             when {
-                n >= 2 -> "Two or more FAST signs detected. This is likely a stroke. Call 1 1 2 immediately. Do not give food or water."
-                n == 1 -> "One FAST sign detected. Keep them calm, note the time, and call 1 1 2. Watch for worsening."
-                else   -> "No clear FAST signs at this time. Keep them calm and monitor closely."
+                n >= 2 -> "Two or more FAST signs detected. This is very likely a stroke. Call one one two immediately. Note when symptoms first appeared — this matters for treatment. Do not give food or water."
+                n == 1 -> "One FAST sign detected. Keep them calm. Call one one two now. Note when symptoms began. Do not give food or water. Watch for any worsening."
+                else   -> "No FAST signs detected now. If any symptoms appeared earlier and have since cleared, this may still be a TIA — a warning sign of stroke. Note the time and call one one two if you are at all concerned."
             }
         }
     }

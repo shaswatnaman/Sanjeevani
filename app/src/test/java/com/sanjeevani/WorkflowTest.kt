@@ -223,7 +223,8 @@ class WorkflowTest {
         assertTrue(r25.voiceText!!.contains("phrase", ignoreCase = true))
         assertFalse("Not complete until speech result received", r25.isComplete)
         // Simulate speech result — advances to RESULT
-        module.onSpeechResult(false)  // slurred = positive sign
+        // positive=true means speech IS impaired (slurred); false means clear
+        module.onSpeechResult(true)   // slurred speech = positive FAST finding
         val rResult = module.process(emptyFrame(25100), 25100)
         assertTrue("Module should be complete after RESULT", rResult.isComplete)
         assertNotNull("RESULT should announce findings", rResult.voiceText)
@@ -244,7 +245,7 @@ class WorkflowTest {
         module.process(emptyFrame(3001), 3001)
         module.process(emptyFrame(13002), 13002)
         module.process(emptyFrame(25003), 25003)
-        module.onSpeechResult(false)  // slurred = positive; skip for now — test signals instead
+        module.onSpeechResult(false)  // false = speech clear = NOT a positive FAST finding
         val signals = module.getStrokeSignals()
         assertTrue("positiveTestCount must be non-negative", signals.positiveTestCount >= 0)
         assertTrue("speechPrompted must be true after speech result", signals.speechPrompted)
@@ -259,6 +260,27 @@ class WorkflowTest {
         assertNotNull("After reset INTRO should re-speak", r.voiceText)
         assertTrue(r.voiceText!!.contains("FAST", ignoreCase = true))
         assertFalse(r.isComplete)
+    }
+
+    @Test fun strokeSpeechSlurredIsPositiveFindings() {
+        // onSpeechResult(true) = slurred = positive FAST finding; (false) = clear = not positive
+        val slurred = com.sanjeevani.engine.StrokeModule()
+        slurred.process(emptyFrame(0), 0)
+        slurred.process(emptyFrame(3001), 3001)   // FACE
+        slurred.process(emptyFrame(13002), 13002) // ARM
+        slurred.process(emptyFrame(25003), 25003) // SPEECH
+        slurred.onSpeechResult(true)              // slurred = positive finding
+        assertTrue("Slurred speech must register as a positive FAST sign",
+            slurred.getStrokeSignals().positiveTestCount >= 1)
+
+        val clear = com.sanjeevani.engine.StrokeModule()
+        clear.process(emptyFrame(0), 0)
+        clear.process(emptyFrame(3001), 3001)
+        clear.process(emptyFrame(13002), 13002)
+        clear.process(emptyFrame(25003), 25003)
+        clear.onSpeechResult(false)               // clear speech = NOT a positive finding
+        assertEquals("Clear speech must NOT be counted as a positive FAST sign",
+            0, clear.getStrokeSignals().positiveTestCount)
     }
 
     @Test fun strokeDoesNotAffectCprOrAllergicFsm() {
