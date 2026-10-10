@@ -25,7 +25,7 @@ private data class EmergencyCard(
 )
 
 private val EMERGENCY_CARDS = listOf(
-    EmergencyCard(EmergencyType.CPR, "❤️", "Heart Stopped", "Not breathing or unconscious", Color(0xFFff6b6b)),
+    EmergencyCard(EmergencyType.CPR, "❤️", "Collapsed", "Not breathing or unresponsive", Color(0xFFff6b6b)),
     EmergencyCard(EmergencyType.FAST_STROKE, "🧠", "Stroke", "Face droop, arm weakness, slurred speech", Color(0xFFa78bfa)),
     EmergencyCard(EmergencyType.HEART_ATTACK, "🫀", "Heart Attack", "Chest pain, still conscious", Color(0xFFf97316)),
     EmergencyCard(EmergencyType.ALLERGIC_REACTION, "💉", "Allergic Reaction", "Severe allergy / EpiPen needed", Color(0xFF4ecca8))
@@ -44,7 +44,7 @@ fun EmergencySelectionScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 16.dp, vertical = 32.dp),
+                .padding(start = 16.dp, end = 16.dp, top = 112.dp, bottom = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
@@ -103,7 +103,7 @@ fun EmergencySelectionScreen(
             }
 
             Text(
-                text = "Tap the emergency you see",
+                text = "Report your concern • this app cannot diagnose. Adult guidance prototype; follow 112.",
                 color = Color(0xAAFFFFFF),
                 fontSize = 12.sp
             )

@@ -38,6 +38,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sanjeevani.model.EmergencyType
 import com.sanjeevani.model.FSMState
 import com.sanjeevani.model.GuidanceState
+import com.sanjeevani.engine.Answer
+import androidx.compose.ui.zIndex
+import com.sanjeevani.llm.LlmState
 import com.sanjeevani.tts.KokoroState
 import com.sanjeevani.ui.AROverlayView
 import com.sanjeevani.ui.EmergencySelectionScreen
@@ -56,6 +59,7 @@ class MainActivity : ComponentActivity() {
             viewModel.ensureInitialized(applicationContext)
             startCamera()
         }
+        requestMicPermissionIfNeeded()
     }
 
     private val requestAudioPermission = registerForActivityResult(
@@ -66,20 +70,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         cameraExecutor = Executors.newSingleThreadExecutor()
+        // Voice and tap fallbacks must work even when camera permission is denied.
+        viewModel.ensureInitialized(applicationContext)
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
             == PackageManager.PERMISSION_GRANTED
         ) {
             viewModel.ensureInitialized(applicationContext)
             startCamera()
+            requestMicPermissionIfNeeded()
         } else {
             requestCameraPermission.launch(Manifest.permission.CAMERA)
-        }
-        // Pre-request mic permission so SpeechRecognizer is ready when needed
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-            requestAudioPermission.launch(Manifest.permission.RECORD_AUDIO)
         }
 
         setContent {
@@ -89,14 +91,22 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onPause() { viewModel.suspendSession(); super.onPause() }
+    override fun onResume() { super.onResume(); viewModel.resumeSession() }
+
     internal var previewView: PreviewView? = null
     internal var cameraPreview: Preview? = null
+
+    private fun requestMicPermissionIfNeeded() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
+            requestAudioPermission.launch(Manifest.permission.RECORD_AUDIO)
+    }
 
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
         cameraProviderFuture.addListener({
             val cameraProvider = cameraProviderFuture.get()
-            val preview = Preview.Builder().build().also { p ->
+            val preview = Preview.Builder().setTargetResolution(Size(720, 1280)).build().also { p ->
                 previewView?.let { p.setSurfaceProvider(it.surfaceProvider) }
             }
             cameraPreview = preview
@@ -107,14 +117,12 @@ class MainActivity : ComponentActivity() {
                 .build()
 
             imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
-                val bitmap = imageProxyToBitmap(imageProxy)
-                viewModel.processFrame(
-                    bitmap,
-                    imageProxy.imageInfo.timestamp / 1_000_000L,
-                    imageProxy.width,
-                    imageProxy.height
-                )
-                imageProxy.close()
+                try {
+                    val bitmap = imageProxyToBitmap(imageProxy)
+                    viewModel.processFrame(bitmap, android.os.SystemClock.elapsedRealtime(), bitmap.width, bitmap.height)
+                } catch (e: Exception) {
+                    android.util.Log.w("SanjeevaniCamera", "Frame unavailable", e)
+                } finally { imageProxy.close() }
             }
 
             try {
@@ -156,7 +164,10 @@ fun SanjeevaniScreen(viewModel: SanjeevaniViewModel) {
     val guidance by viewModel.guidanceState.collectAsStateWithLifecycle()
     val isListening by viewModel.isListening.collectAsStateWithLifecycle()
     val isSpeaking by viewModel.isSpeaking.collectAsStateWithLifecycle()
+    val voiceStatus by viewModel.voiceStatus.collectAsStateWithLifecycle()
+    val muted by viewModel.isMuted.collectAsStateWithLifecycle()
     val kokoroState by viewModel.kokoroState.collectAsStateWithLifecycle()
+    val llmState by viewModel.llmState.collectAsStateWithLifecycle()
     val activity = androidx.compose.ui.platform.LocalContext.current as? MainActivity
 
     LaunchedEffect(guidance.fsmState) {
@@ -172,6 +183,7 @@ fun SanjeevaniScreen(viewModel: SanjeevaniViewModel) {
             factory = { ctx ->
                 PreviewView(ctx).apply {
                     implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                    scaleType = PreviewView.ScaleType.FIT_CENTER
                 }
             },
             update = { view ->
@@ -202,10 +214,15 @@ fun SanjeevaniScreen(viewModel: SanjeevaniViewModel) {
         Column(
             modifier = Modifier
                 .align(Alignment.TopEnd)
+                .zIndex(2f)
                 .padding(16.dp)
         ) {
             Button(
-                onClick = { /* launch dialer 112 */ },
+                onClick = {
+                    if (!muted) viewModel.toggleMuted()
+                    activity?.startActivity(android.content.Intent(android.content.Intent.ACTION_DIAL,
+                        android.net.Uri.parse("tel:112")))
+                },
                 colors = ButtonDefaults.buttonColors(containerColor = Color.Red),
                 modifier = Modifier.padding(bottom = 8.dp)
             ) {
@@ -225,7 +242,7 @@ fun SanjeevaniScreen(viewModel: SanjeevaniViewModel) {
                 shape = MaterialTheme.shapes.small
             ) {
                 Text(
-                    text = stateLabel(guidance.fsmState),
+                    text = stateLabel(guidance.fsmState) + "\\n" + voiceStatus,
                     color = Color.White,
                     fontSize = 12.sp,
                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
@@ -248,38 +265,65 @@ fun SanjeevaniScreen(viewModel: SanjeevaniViewModel) {
                     )
                 }
             }
+            // Show on-device LLM status only while loading or on error
+            val llmLabel = when (llmState) {
+                is LlmState.Loading -> "🤖 Loading AI model…"
+                is LlmState.Error   -> "🤖 AI offline"
+                else -> null
+            }
+            llmLabel?.let {
+                Surface(color = Color(0x99000000), shape = MaterialTheme.shapes.small) {
+                    Text(
+                        text = it,
+                        color = Color(0xFF93C5FD),
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                    )
+                }
+            }
         }
 
-        // "No Response" confirm — tap button OR say "no response" into mic
-        if (guidance.fsmState == FSMState.RESPONSIVENESS_CHECK) {
+        val state = guidance.fsmState
+        val answerVersion = guidance.stateVersion
+        if (state !in setOf(FSMState.IDLE, FSMState.TRIAGE_DETECTION, FSMState.SCENE_ASSESSMENT)) {
             Column(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(horizontal = 24.dp, vertical = 32.dp)
-                    .fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+                modifier = Modifier.align(Alignment.BottomCenter)
+                    .padding(horizontal = 16.dp, vertical = 24.dp).fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                // Mic button — tap to speak "no response"
-                val micBg = if (isListening) Color(0xFFE53935) else Color(0x99000000)
-                val micLabel = if (isListening) "🎙 Listening…" else "🎙 Say \"No Response\""
-                Button(
-                    onClick = {
-                        if (isListening) viewModel.stopListening()
-                        else viewModel.startListening()
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = micBg),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(micLabel, color = Color.White, fontSize = 14.sp)
+                if (state == FSMState.RESPONSIVENESS_CHECK || state == FSMState.BREATHING_ASSESSMENT) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = { viewModel.answer(Answer.YES, answerVersion) }, modifier = Modifier.weight(1f)) {
+                            Text(if (state == FSMState.RESPONSIVENESS_CHECK) "Yes, responding" else "Normal breathing")
+                        }
+                        Button(onClick = { viewModel.answer(Answer.NO, answerVersion) }, modifier = Modifier.weight(1f)) {
+                            Text(if (state == FSMState.RESPONSIVENESS_CHECK) "No response" else "Not normal / gasping")
+                        }
+                    }
                 }
-                // Tap button fallback
-                Button(
-                    onClick = { viewModel.confirmNoResponse() },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF5722)),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("No Response — Start CPR Guidance", color = Color.White, fontSize = 16.sp)
+                if (state in setOf(FSMState.CPR_POSITIONING, FSMState.POSITION_CONFIRMED,
+                        FSMState.HAND_POSITIONING, FSMState.POSTURE_CHECK)) {
+                    Button(onClick = { viewModel.answer(Answer.READY, answerVersion) }, modifier = Modifier.fillMaxWidth()) {
+                        Text(when (state) {
+                            FSMState.CPR_POSITIONING, FSMState.POSITION_CONFIRMED -> "I confirm: on back • ready"
+                            FSMState.HAND_POSITIONING -> "I confirm hand placement (manual)"
+                            else -> "Arms straight • ready to start"
+                        })
+                    }
+                }
+                if (state == FSMState.HEART_ATTACK_CONSCIOUS || state == FSMState.COMPRESSION_ACTIVE) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = { viewModel.answer(Answer.CHANGED, answerVersion) }, modifier = Modifier.weight(1f)) { Text("Condition changed") }
+                        Button(onClick = { viewModel.answer(Answer.HELP_ARRIVED, answerVersion) }, modifier = Modifier.weight(1f)) { Text("Team taking over") }
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = { viewModel.startListening() }, modifier = Modifier.weight(1f)) {
+                        Text(if (isListening) "Listening…" else "Speak / interrupt")
+                    }
+                    Button(onClick = { viewModel.toggleMuted() }, modifier = Modifier.weight(1f)) {
+                        Text(if (muted) "Resume voice" else "Mute for dispatcher")
+                    }
                 }
             }
         }
@@ -320,29 +364,7 @@ fun SanjeevaniScreen(viewModel: SanjeevaniViewModel) {
             }
         }
 
-        // One-turn, state-aware voice help during active guidance. Tapping first
-        // stops guidance audio so speech recognition cannot hear the app itself.
-        val voiceCompanionAvailable = guidance.fsmState !in setOf(
-            FSMState.IDLE,
-            FSMState.SCENE_ASSESSMENT,
-            FSMState.TRIAGE_DETECTION,
-            FSMState.RESPONSIVENESS_CHECK
-        )
-        if (voiceCompanionAvailable) {
-            ExtendedFloatingActionButton(
-                onClick = {
-                    if (isListening) viewModel.stopListening()
-                    else viewModel.startVoiceCompanion()
-                },
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(end = 20.dp, bottom = 112.dp),
-                containerColor = if (isListening) Color(0xFFE53935) else Color(0xFF075985),
-                contentColor = Color.White,
-                icon = { Text(if (isListening) "■" else "🎙", fontSize = 18.sp) },
-                text = { Text(if (isListening) "Listening…" else "Ask Sanjeevani") }
-            )
-        }
+
     }
 }
 
@@ -411,6 +433,8 @@ private fun stateLabel(state: FSMState): String = when (state) {
     FSMState.SCENE_ASSESSMENT -> "Emergency detected"
     FSMState.TRIAGE_DETECTION -> "Select emergency"
     FSMState.RESPONSIVENESS_CHECK -> "Check response"
+    FSMState.BREATHING_ASSESSMENT -> "Check breathing"
+    FSMState.POSITION_CONFIRMED -> "Confirm surface"
     FSMState.EMERGENCY_ESCALATION -> "Call 112 now"
     FSMState.CPR_POSITIONING -> "Position rescuer"
     FSMState.HAND_POSITIONING -> "Hand placement"
@@ -419,6 +443,6 @@ private fun stateLabel(state: FSMState): String = when (state) {
     FSMState.CPR_PAUSE -> "Paused"
     FSMState.CPR_SUCCESS -> "Done"
     FSMState.STROKE_FAST_TEST -> "FAST Test"
-    FSMState.HEART_ATTACK_CONSCIOUS -> "Heart Attack"
+    FSMState.HEART_ATTACK_CONSCIOUS -> "Monitor • follow dispatcher"
     FSMState.ALLERGIC_PROTOCOL -> "Allergic Reaction"
 }

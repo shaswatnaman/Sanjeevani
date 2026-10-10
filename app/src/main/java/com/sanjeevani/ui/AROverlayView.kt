@@ -10,6 +10,8 @@ import android.os.Looper
 import android.view.View
 import com.sanjeevani.model.AROverlaySpec
 import com.sanjeevani.model.EmergencyType
+import com.sanjeevani.model.FSMState
+import android.view.animation.LinearInterpolator
 
 class AROverlayView(context: Context) : View(context) {
 
@@ -17,11 +19,8 @@ class AROverlayView(context: Context) : View(context) {
         set(value) {
             val previous = field
             field = value
-            if (previous?.stepCardTitle == "1. Position Check" &&
-                value?.stepCardTitle == "1. Position Check" &&
-                isPositionRed(previous.stepCardBgColor) &&
-                isPositionGreen(value.stepCardBgColor)
-            ) {
+            if (value != null && value.confirmationEvent > lastConfirmationEvent) {
+                lastConfirmationEvent = value.confirmationEvent
                 startPositionReadyAnimation()
             }
             updateCompressionSphereAnimation(value)
@@ -29,6 +28,15 @@ class AROverlayView(context: Context) : View(context) {
             invalidate()
         }
 
+    private var lastConfirmationEvent = 0L
+    private fun sx(x: Float): Float {
+        val s = overlaySpec ?: return x * width
+        return OverlayCoordinates.fit(x, 0f, s.imageWidth, s.imageHeight, width, height).first
+    }
+    private fun sy(y: Float): Float {
+        val s = overlaySpec ?: return y * height
+        return OverlayCoordinates.fit(0f, y, s.imageWidth, s.imageHeight, width, height).second
+    }
     private var stepCardScale = 1f
     private var stepCardAnimator: ValueAnimator? = null
     private var spherePulseFraction = 0f
@@ -147,6 +155,19 @@ class AROverlayView(context: Context) : View(context) {
     private val vitalsHeartPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.argb(140, 180, 180, 180); style = Paint.Style.FILL; textSize = 54f
     }
+    // Pre-allocated paints for draw methods (avoids per-frame GC pressure)
+    private val sphereGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val sphereBodyPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val sphereHighlightPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(120, 255, 255, 255); style = Paint.Style.FILL
+    }
+    private val cprSubBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(180, 0, 0, 0); style = Paint.Style.FILL
+    }
+    private val heartDynamicPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val safeRangePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(180, 34, 139, 34); style = Paint.Style.FILL
+    }
     private val progressBarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
     }
@@ -187,13 +208,13 @@ class AROverlayView(context: Context) : View(context) {
         skeletonPaint.strokeWidth = 6f
         spec.skeletonLines.forEach { (from, to) ->
             skeletonPaint.color = Color.argb(220, 255, 214, 10)   // iOS systemYellow
-            canvas.drawLine(from.x * width, from.y * height, to.x * width, to.y * height, skeletonPaint)
+            canvas.drawLine(sx(from.x), sy(from.y), sx(to.x), sy(to.y), skeletonPaint)
         }
 
         // ── Joint dots (heatmap colored, large and precise like iOS) ─────────
         spec.jointPoints.forEach { (pt, color) ->
-            val px = pt.x * width
-            val py = pt.y * height
+            val px = sx(pt.x)
+            val py = sy(pt.y)
             val radius = 22f
             // Dark outline for contrast against any background
             jointOutlinePaint.strokeWidth = 3f
@@ -203,9 +224,9 @@ class AROverlayView(context: Context) : View(context) {
         }
 
         // ── Sternum target: iOS-style large blue sphere with sheen ────────────
-        spec.sternumTarget?.let { t ->
-            val px = t.x * width
-            val py = t.y * height
+        (spec.sternumTarget ?: if (spec.state == FSMState.COMPRESSION_ACTIVE) PointF(.5f, .65f) else null)?.let { t ->
+            val px = sx(t.x)
+            val py = sy(t.y)
             val baseRadius = 58f
             val pulseActive = spherePulseAnimator != null
             val r = if (pulseActive) {
@@ -223,62 +244,55 @@ class AROverlayView(context: Context) : View(context) {
                 Color.argb(255, 30, 130, 220)
             }
             // Outer glow
-            val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.argb(
-                    70,
-                    Color.red(pulseColor),
-                    Color.green(pulseColor),
-                    Color.blue(pulseColor)
-                )
-                style = Paint.Style.FILL
-            }
-            canvas.drawCircle(px, py, r + 18f, glowPaint)
+            sphereGlowPaint.color = Color.argb(
+                70,
+                Color.red(pulseColor),
+                Color.green(pulseColor),
+                Color.blue(pulseColor)
+            )
+            canvas.drawCircle(px, py, r + 18f, sphereGlowPaint)
             // Main sphere body — iOS cyan-blue
             val highlightColor = sphereColorEvaluator.evaluate(
                 0.32f,
                 pulseColor,
                 Color.WHITE
             ) as Int
-            val spherePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                shader = android.graphics.RadialGradient(
-                    px - r * 0.28f, py - r * 0.28f, r,
-                    intArrayOf(highlightColor, pulseColor),
-                    floatArrayOf(0f, 1f),
-                    android.graphics.Shader.TileMode.CLAMP
-                )
-            }
-            canvas.drawCircle(px, py, r, spherePaint)
+            sphereBodyPaint.shader = android.graphics.RadialGradient(
+                px - r * 0.28f, py - r * 0.28f, r,
+                intArrayOf(highlightColor, pulseColor),
+                floatArrayOf(0f, 1f),
+                android.graphics.Shader.TileMode.CLAMP
+            )
+            canvas.drawCircle(px, py, r, sphereBodyPaint)
             // Specular highlight (top-left white spot)
-            val highlightPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.argb(120, 255, 255, 255); style = Paint.Style.FILL
-            }
-            canvas.drawCircle(px - r * 0.28f, py - r * 0.28f, r * 0.32f, highlightPaint)
+            canvas.drawCircle(px - r * 0.28f, py - r * 0.28f, r * 0.32f, sphereHighlightPaint)
 
-            if (spec.stepCardTitle == "5. Chest Compressions") {
+            if (spec.state == FSMState.COMPRESSION_ACTIVE) {
                 val bpm = spec.compressionRate ?: 0f
                 val paceColor = when {
                     bpm <= 0f -> Color.WHITE
-                    bpm < 90f || bpm > 130f -> Color.rgb(255, 59, 48)
+                    bpm < 100f || bpm > 120f -> Color.rgb(255, 59, 48)
                     else -> Color.rgb(52, 211, 153)
                 }
                 sphereCountPaint.color = paceColor
                 sphereCountLabelPaint.color = paceColor
                 val countY = py - baseRadius - 70f
                 canvas.drawText(spec.compressionCount.toString(), px, countY, sphereCountPaint)
-                canvas.drawText("compressions", px, countY + 35f, sphereCountLabelPaint)
+                canvas.drawText(if (spec.countReliable) "estimated cycles" else "tracking unavailable", px, countY + 35f, sphereCountLabelPaint)
+                canvas.drawText("Pacing cue • not depth", px, py + baseRadius + 50f, sphereCountLabelPaint)
             }
         }
 
         // ── Hand marker ───────────────────────────────────────────────────────
         spec.leftHandCenter?.let { h ->
-            canvas.drawCircle(h.x * width, h.y * height, 20f, handDotPaint)
+            canvas.drawCircle(sx(h.x), sy(h.y), 20f, handDotPaint)
         }
 
         // ── Correction arrow ──────────────────────────────────────────────────
         spec.arrowFrom?.let { from ->
             spec.arrowTo?.let { to ->
-                val fx = from.x * width; val fy = from.y * height
-                val tx = to.x * width; val ty = to.y * height
+                val fx = sx(from.x); val fy = sy(from.y)
+                val tx = sx(to.x); val ty = sy(to.y)
                 canvas.drawLine(fx, fy, tx, ty, arrowPaint)
                 drawArrowHead(canvas, fx, fy, tx, ty)
             }
@@ -289,7 +303,7 @@ class AROverlayView(context: Context) : View(context) {
 
         // ── Guidance direction arrow text (center-bottom, only while positioning) ─
         if (spec.guidanceText.isNotEmpty()) {
-            val isHandPlacementCorrection = spec.stepCardTitle == "3. Hand Placement"
+            val isHandPlacementCorrection = spec.state == FSMState.HAND_POSITIONING
             guidancePaint.color = if (isHandPlacementCorrection) {
                 Color.rgb(255, 59, 48) // 0xFFFF3B30
             } else {
@@ -318,8 +332,8 @@ class AROverlayView(context: Context) : View(context) {
 
     // "🫀 CPR/Heart Attack" pill + subtitle — matches iOS CardiacArrestView header
     private fun drawCPRHeaderBadge(canvas: Canvas, spec: AROverlaySpec) {
-        val label = if (spec.emergencyType == EmergencyType.HEART_ATTACK) "🫀 Heart Attack" else "🫀 CPR"
-        val sublabel = if (spec.emergencyType == EmergencyType.HEART_ATTACK) "Cardiac Emergency" else "Chest Compressions"
+        val label = "CPR guidance"
+        val sublabel = "Adult prototype • follow 112"
         val pill_h = 56f; val pill_r = 14f; val pad = 20f
         val tw = cprBadgeTextPaint.measureText(label)
         val left = (width - tw) / 2f - pad
@@ -331,15 +345,14 @@ class AROverlayView(context: Context) : View(context) {
         val sw = cprSubtitlePaint.measureText(sublabel)
         val subBgLeft = (width - sw) / 2f - 16f
         val subBgTop = bottom + 6f
-        val subBgPaint = Paint(cprBadgeBgPaint).apply { color = Color.argb(180, 0, 0, 0) }
-        canvas.drawRoundRect(subBgLeft, subBgTop, subBgLeft + sw + 32f, subBgTop + 36f, 8f, 8f, subBgPaint)
+        canvas.drawRoundRect(subBgLeft, subBgTop, subBgLeft + sw + 32f, subBgTop + 36f, 8f, 8f, cprSubBgPaint)
         canvas.drawText(sublabel, subBgLeft + 16f, subBgTop + 26f, cprSubtitlePaint)
     }
 
     // Vitals panel: shows real BPM from compressionRate with color coding + pulsing heart
     private fun drawVitalsPanel(canvas: Canvas) {
         val spec = overlaySpec ?: return
-        val panelW = width * 0.42f
+        val panelW = width * 0.35f
         val panelH = 230f
         val left = 16f; val top = height * 0.28f
         val right = left + panelW; val bottom = top + panelH
@@ -361,12 +374,11 @@ class AROverlayView(context: Context) : View(context) {
             bpm > 0f -> Color.rgb(255, 160, 40)             // out of range: orange
             else -> Color.argb(140, 160, 160, 160)          // no compressions: grey
         }
-        val heartPaintLocal = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = heartColor; textSize = 60f * heartScale
-        }
+        heartDynamicPaint.color = heartColor
+        heartDynamicPaint.textSize = 60f * heartScale
         val heartStr = "♥"
-        val hx = (left + right) / 2f - heartPaintLocal.measureText(heartStr) / 2f
-        canvas.drawText(heartStr, hx, top + 120f, heartPaintLocal)
+        val hx = (left + right) / 2f - heartDynamicPaint.measureText(heartStr) / 2f
+        canvas.drawText(heartStr, hx, top + 120f, heartDynamicPaint)
 
         // BPM display: real value or "--"
         val bpmStr = if (bpm > 0f) "${bpm.toInt()} BPM" else "-- BPM"
@@ -385,10 +397,7 @@ class AROverlayView(context: Context) : View(context) {
             val sw = vitalsLabelPaint.measureText(badgeStr)
             val bBgLeft = (left + right) / 2f - sw / 2f - 8f
             val bBgTop = bottom - 38f
-            val safePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.argb(180, 34, 139, 34); style = Paint.Style.FILL
-            }
-            canvas.drawRoundRect(bBgLeft, bBgTop, bBgLeft + sw + 16f, bBgTop + 26f, 8f, 8f, safePaint)
+            canvas.drawRoundRect(bBgLeft, bBgTop, bBgLeft + sw + 16f, bBgTop + 26f, 8f, 8f, safeRangePaint)
             canvas.drawText(badgeStr, bBgLeft + 8f, bBgTop + 18f, vitalsLabelPaint)
         }
     }
@@ -397,7 +406,7 @@ class AROverlayView(context: Context) : View(context) {
     private fun drawStepCard(canvas: Canvas, spec: AROverlaySpec) {
         if (spec.stepCardTitle.isEmpty()) return
 
-        val cardLeft = width * 0.38f
+        val cardLeft = width * 0.05f
         val cardRight = width - 20f
         val cardTop = height * 0.14f
         val cardW = cardRight - cardLeft
@@ -407,7 +416,8 @@ class AROverlayView(context: Context) : View(context) {
 
         // Measure body text (wrap at card width)
         val bodyLines = wrapText(spec.stepCardInstruction, cardBodyPaint, cardW - padding * 2)
-        val cardH = padding + lineH + 12f + (bodyLines.size * lineH * 0.9f) + 20f + lineH + padding
+        val statusLines = wrapText(spec.stepCardStatus, cardStatusPaint, cardW - padding * 2)
+        val cardH = padding + lineH + 12f + (bodyLines.size * lineH * 0.9f) + 20f + statusLines.size * lineH + padding
 
         val saveCount = canvas.save()
         if (spec.stepCardTitle == "1. Position Check" && stepCardScale != 1f) {
@@ -438,7 +448,10 @@ class AROverlayView(context: Context) : View(context) {
         y += 16f
 
         // Status line (bold white)
-        canvas.drawText(spec.stepCardStatus, cardLeft + padding, y, cardStatusPaint)
+        for (line in statusLines) {
+            canvas.drawText(line, cardLeft + padding, y, cardStatusPaint)
+            y += lineH
+        }
 
         // Compression counter below card (only during compressions)
         if (spec.compressionCount > 0 || spec.elapsedSecs > 0) {
@@ -486,14 +499,14 @@ class AROverlayView(context: Context) : View(context) {
     }
 
     private fun updateCompressionSphereAnimation(spec: AROverlaySpec?) {
-        val shouldPulse = spec?.stepCardTitle == "5. Chest Compressions" &&
-            spec.statusColorGreen && spec.sternumTarget != null
+        val shouldPulse = spec?.state == FSMState.COMPRESSION_ACTIVE
 
         val updateAnimation = {
             if (shouldPulse) {
                 if (spherePulseAnimator == null) {
                     spherePulseAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-                        duration = 250L
+                        duration = 30000L / (spec?.pacingBpm ?: 110).coerceIn(100, 120)
+                        interpolator = LinearInterpolator()
                         repeatCount = ValueAnimator.INFINITE
                         repeatMode = ValueAnimator.REVERSE
                         addUpdateListener { animator ->
@@ -585,9 +598,9 @@ class AROverlayView(context: Context) : View(context) {
         if (type == EmergencyType.UNKNOWN || type == EmergencyType.CPR || type == EmergencyType.HEART_ATTACK) return
         val color = emergencyColor(type)
         val label = when (type) {
-            EmergencyType.FAST_STROKE       -> "STROKE"
+            EmergencyType.FAST_STROKE       -> "REPORTED STROKE CONCERN"
             EmergencyType.HEART_ATTACK      -> "HEART ATTACK"
-            EmergencyType.ALLERGIC_REACTION -> "ALLERGIC"
+            EmergencyType.ALLERGIC_REACTION -> "REPORTED ALLERGY CONCERN"
             else -> return
         }
         val tw = badgeTextPaint.measureText(label)
@@ -603,8 +616,8 @@ class AROverlayView(context: Context) : View(context) {
     private fun drawEpiPenMarker(canvas: Canvas, spec: AROverlaySpec) {
         if (!spec.showEpiPenMarker) return
         val target = spec.sternumTarget ?: return
-        val px = target.x * width
-        val py = target.y * height
+        val px = sx(target.x)
+        val py = sy(target.y)
 
         // Pulsing animation
         if (epiPenPulseGrowing) {

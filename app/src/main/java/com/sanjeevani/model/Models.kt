@@ -29,6 +29,8 @@ enum class FSMState {
     IDLE,
     SCENE_ASSESSMENT,
     RESPONSIVENESS_CHECK,
+    BREATHING_ASSESSMENT,
+    POSITION_CONFIRMED,
     EMERGENCY_ESCALATION,
     CPR_POSITIONING,
     HAND_POSITIONING,
@@ -67,7 +69,9 @@ data class PerceptionFrame(
     // 3D world landmarks in meters (origin = hip midpoint; Y=up, Z=toward camera)
     val worldLandmarks: List<NormalizedLandmark>? = null,
     // 478 face mesh landmarks (normalized screen coords)
-    val faceLandmarks: List<NormalizedLandmark>? = null
+    val faceLandmarks: List<NormalizedLandmark>? = null,
+    val poseTimestamp: Long = timestamp,
+    val handTimestamp: Long = timestamp
 )
 
 // ─── Scene ───────────────────────────────────────────────────────────────────
@@ -77,14 +81,16 @@ data class SpatialState(
     val handMidpoint: PointF? = null,
     val errorVector: PointF? = null,
     val errorMagnitude: Float = Float.MAX_VALUE,
-    val correctiveAction: SpatialAction = SpatialAction.UNSURE
+    val correctiveAction: SpatialAction = SpatialAction.UNSURE,
+    val trackedHand: String? = null
 )
 
 data class TemporalState(
     val compressionRateBPM: Float = 0f,
     val rateStatus: RateStatus = RateStatus.INSUFFICIENT_DATA,
     val compressionCount: Int = 0,
-    val elbowAngleDegrees: Float = 180f
+    val elbowAngleDegrees: Float = 180f,
+    val trackingReliable: Boolean = false
 )
 
 data class ConfidenceState(
@@ -158,7 +164,13 @@ data class AROverlaySpec(
     val phaseProgress: Float = 0f,
     val showEpiPenMarker: Boolean = false,
     val leftShoulderY: Float = 0f,
-    val rightShoulderY: Float = 0f
+    val rightShoulderY: Float = 0f,
+    val state: FSMState = FSMState.IDLE,
+    val confirmationEvent: Long = 0L,
+    val pacingBpm: Int = 110,
+    val imageWidth: Int = 1,
+    val imageHeight: Int = 1,
+    val countReliable: Boolean = false
 )
 
 data class GuidanceState(
@@ -174,5 +186,6 @@ data class GuidanceState(
     val isPatientDetected: Boolean = false,
     val isRescuerDetected: Boolean = false,
     val triageState: TriageState = TriageState.OBSERVING,
-    val classifierSignal: ClassifierSignal? = null
+    val classifierSignal: ClassifierSignal? = null,
+    val stateVersion: Long = 0L
 )

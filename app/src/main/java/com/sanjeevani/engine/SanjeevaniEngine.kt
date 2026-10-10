@@ -2,517 +2,214 @@ package com.sanjeevani.engine
 
 import android.graphics.Color
 import android.graphics.PointF
+import android.os.SystemClock
+import android.util.Log
 import com.sanjeevani.model.*
-import kotlin.math.sqrt
+import kotlin.math.hypot
 
-private const val LEFT_SHOULDER = 11
-private const val RIGHT_SHOULDER = 12
-private const val LEFT_WRIST = 15
-private const val RIGHT_WRIST = 16
+data class DialogueEvidence(val state: FSMState, val version: Long, val transcript: String,
+    val confidence: Float, val answer: Answer)
+data class SessionContext(val reportedConcern: String, val activeConcern: EmergencyType,
+    val question: String, val responding: Boolean?, val normalBreathing: Boolean?,
+    val completedSteps: Set<FSMState>, val recentAnswers: List<DialogueEvidence>)
 
+/** Serial, main-thread coordinator. FSM owns progression; overlays only project it. */
 class SanjeevaniEngine {
-
+    private val fsm = EmergencyFSM()
     private val spatialReasoner = SpatialReasoner()
-    private val compressionDetector = CompressionDetector()
-    private val emergencyFSM = EmergencyFSM()
     private val patientDetector = PatientDetector()
-    private val classifier = EmergencyClassifier()
-    private val allergicModule = AllergicReactionModule()
-    private val strokeModule = StrokeModule()
-    private val heartAttackModule = HeartAttackModule()
-    private val cprWorkflow = CPRWorkflow()
+    private val compressionDetector = CompressionDetector()
+    private var latest = GuidanceState()
+    private var frame: PerceptionFrame? = null
+    private var lastPoseTimestamp = -1L
+    private var lastHandTimestamp = -1L
+    private var lastFrameTimestamp = -1L
+    private var announcedVersion = -1L
+    private var lastCorrectionTs = -10000L
+    private var paceVoiceTs = -10000L
+    private var milestone = 0
+    private var activeSince = 0L
+    private var trackedHand: String? = null
+    private var transitionLogged = 0L
+    private var visionAfter = 0L
+    private var reportedConcern = ""
+    private val answers = ArrayDeque<DialogueEvidence>()
+    val sessionContext get() = SessionContext(reportedConcern, fsm.getConfirmedEmergencyType(),
+        fsm.instruction(), fsm.responding, fsm.breathingNormally, fsm.completed.toSet(), answers.toList())
+    fun recordUtterance(text: String, confidence: Float, answer: Answer, concern: EmergencyType?) {
+        if (concern != null && reportedConcern.isEmpty()) reportedConcern = text.take(500)
+        answers.addLast(DialogueEvidence(fsm.getState(), fsm.version, text.take(500), confidence, answer))
+        if (answers.size > 20) answers.removeFirst()
+    }
+    val stateVersion get() = fsm.version
+    val history get() = fsm.history.toList()
+    fun getFSMState() = fsm.getState()
+    fun instruction() = fsm.instruction()
+    fun expectsAnswer() = fsm.expectsAnswer()
 
-    private var lastVoiceText: String? = null
-    private var lastVoiceTs = 0L
-    private var lastTriageState = TriageState.OBSERVING
-    private var classifierSignal: ClassifierSignal? = null
-    private var lastAnnouncedStep: CPRStep? = null
-    private var lastIsLying = false
-    private var openingVoiceTriagePending = true
-    private var latestFrameTimestampMs = 0L
-    private var guidanceDeferredUntilMs = 0L
-    private var lastSpatialVoiceTs = 0L
-    private var hasSpokenCompressionStart = false
-    private var lastObservedCprStep: CPRStep? = null
-    private var paceVoiceTs = 0L
-    private var pendingCompressionMilestone = 0
-    private var lastAnnouncedCompressionMilestone = 0
-
-    // Step card timing
-    private var compressionStartMs = 0L
-    private var lastCompressionCount = 0
-
-    private val MIN_VOICE_INTERVAL_MS: Long
-        get() = when (emergencyFSM.getConfirmedEmergencyType()) {
-            EmergencyType.ALLERGIC_REACTION, EmergencyType.HEART_ATTACK -> 5000L
-            else -> 2500L
-        }
-
-    fun process(frame: PerceptionFrame): GuidanceState {
-        val nowMs = frame.timestamp
-        latestFrameTimestampMs = nowMs
-
-        // ── Perception confidence ─────────────────────────────────────────────
-        val poseConf = frame.poseLandmarks
-            ?.map { it.visibility }
-            ?.average()
-            ?.toFloat() ?: 0f
-
-        val handsConf = if (frame.leftHandLandmarks != null || frame.rightHandLandmarks != null) 0.8f else 0.2f
-
-        val confidence = ConfidenceState(
-            poseConfidence = poseConf,
-            handsConfidence = handsConf,
-            patientConfidence = 0f,
-            overall = when {
-                poseConf > 0.75f && handsConf > 0.6f -> ConfidenceLevel.HIGH
-                poseConf > 0.50f -> ConfidenceLevel.MEDIUM
-                else -> ConfidenceLevel.LOW
-            }
-        )
-
-        // ── Patient detection (2D + world landmarks) ─────────────────────────
-        val (isPatient, patientConf) = patientDetector.isPatientLying(frame.poseLandmarks, frame.worldLandmarks)
-
-        val selectedTypeAtFrameStart = emergencyFSM.getConfirmedEmergencyType()
-        val cprGuidanceActive = (selectedTypeAtFrameStart == EmergencyType.CPR ||
-            selectedTypeAtFrameStart == EmergencyType.HEART_ATTACK) &&
-            emergencyFSM.getState() != FSMState.RESPONSIVENESS_CHECK
-
-        // CPR guidance must remain silent until an emergency has been selected.
-        if (cprGuidanceActive) cprWorkflow.update(nowMs, isPatient)
-        val positionReady = cprGuidanceActive && cprWorkflow.isPositionLocked
-
-        // ── CPR step voice — speak when step changes ──────────────────────────
-        val cprStep = cprWorkflow.currentStep
-        if (cprStep != lastObservedCprStep) {
-            val prevStep = lastObservedCprStep
-            lastObservedCprStep = cprStep
-            hasSpokenCompressionStart = false
-            // Reset compression detection only when entering compressions fresh (not from a 30-count reminder)
-            if (cprStep == CPRStep.COMPRESSIONS && prevStep != CPRStep.MAINTAIN_RHYTHM) {
-                compressionDetector.reset()
-                cprWorkflow.updateCompressionMetrics(0, 0f)
-                paceVoiceTs = 0L
-                pendingCompressionMilestone = 0
-                lastAnnouncedCompressionMilestone = 0
+    fun process(input: PerceptionFrame): GuidanceState {
+        if (input.timestamp <= lastFrameTimestamp) return latest.copy(voiceText = null)
+        lastFrameTimestamp = input.timestamp
+        val boundary = maxOf(visionAfter, fsm.history.lastOrNull()?.timestamp ?: 0)
+        val freshPose = input.timestamp - input.poseTimestamp in 0..300 && input.poseTimestamp >= boundary
+        val freshHands = input.timestamp - input.handTimestamp in 0..250 && input.handTimestamp >= boundary &&
+            kotlin.math.abs(input.handTimestamp - input.poseTimestamp) <= 150
+        val safeFrame = input.copy(poseLandmarks = input.poseLandmarks.takeIf { freshPose },
+            worldLandmarks = input.worldLandmarks.takeIf { freshPose },
+            leftHandLandmarks = input.leftHandLandmarks.takeIf { freshHands },
+            rightHandLandmarks = input.rightHandLandmarks.takeIf { freshHands })
+        frame = safeFrame
+        val state = fsm.getState()
+        val pose = safeFrame.poseLandmarks
+        val poseConf = listOf(11,12,23,24).map { pose?.getOrNull(it)?.visibility ?: 0f }.minOrNull() ?: 0f
+        val spatial = spatialReasoner.compute(pose, safeFrame.leftHandLandmarks, safeFrame.rightHandLandmarks, input.timestamp)
+        // Only the active position step examines lying posture.
+        val patient = if (state == FSMState.CPR_POSITIONING)
+            patientDetector.isPatientLying(pose, safeFrame.worldLandmarks) else false to 0f
+        val handsConf = if (spatial.handMidpoint != null) .8f else 0f
+        val confidence = ConfidenceState(poseConf, handsConf, patient.second,
+            if (poseConf >= .65f && handsConf >= .65f) ConfidenceLevel.HIGH else ConfidenceLevel.LOW)
+        val newPose = input.poseTimestamp > lastPoseTimestamp && freshPose
+        val newHand = input.handTimestamp > lastHandTimestamp && freshHands
+        if (state == FSMState.COMPRESSION_ACTIVE && newHand && spatial.handMidpoint != null &&
+            spatial.sternumTarget != null && spatial.errorMagnitude < .12f && poseConf >= .65f) {
+            if (trackedHand != spatial.trackedHand) compressionDetector.trackingLost()
+            trackedHand = spatial.trackedHand
+            val torso = pose?.let { hypot((it[23].x + it[24].x - it[11].x - it[12].x)/2f,
+                (it[23].y + it[24].y - it[11].y - it[12].y)/2f) } ?: 0f
+            if (torso > .1f) compressionDetector.addSample(
+                (spatial.handMidpoint.y - spatial.sternumTarget.y) / torso, input.handTimestamp)
+        } else if (state == FSMState.COMPRESSION_ACTIVE && (!freshHands || spatial.handMidpoint == null ||
+                spatial.errorMagnitude >= .12f || poseConf < .65f)) compressionDetector.trackingLost()
+        if (newPose || pose == null) {
+            if (state != FSMState.HAND_POSITIONING || newHand || spatial.handMidpoint == null) {
+                fsm.process(GuidanceState(spatial = spatial, confidence = confidence,
+                    isPatientDetected = patient.first), input.poseTimestamp)
             }
         }
-        // stepVoiceScript is set for step transitions that use segmented voice delivery.
-        // stepVoice is for simple single-utterance steps.
-        var stepVoiceScript: VoiceScript? = null
-        val stepVoice: String? = if (!cprGuidanceActive || nowMs < guidanceDeferredUntilMs) null else when {
-            cprStep != lastAnnouncedStep -> {
-                lastAnnouncedStep = cprStep
-                when (cprStep) {
-                    CPRStep.POSITION_CHECK -> if (positionReady) {
-                        lastIsLying = true
-                        "Great — she's in position. Let's begin CPR."
-                    } else {
-                        lastIsLying = false
-                        "Roll her onto her back on a firm, flat surface."
-                    }
-                    CPRStep.KNEEL_BESIDE ->
-                        "Good. Now kneel beside the person and position your knees near their body."
-                    CPRStep.HAND_PLACEMENT -> {
-                        stepVoiceScript = VoiceScript(listOf(
-                            VoiceSegment("Place one hand in the center of the chest.", VoiceUrgency.NORMAL, 300),
-                            VoiceSegment("Heel of the hand on the blue marker.", VoiceUrgency.NORMAL, 300),
-                            VoiceSegment("Stack the other hand on top and interlace your fingers.", VoiceUrgency.CALM, 0)
-                        ))
-                        null
-                    }
-                    CPRStep.BODY_POSITION -> {
-                        stepVoiceScript = VoiceScript(listOf(
-                            VoiceSegment("Lock your arms straight.", VoiceUrgency.NORMAL, 300),
-                            VoiceSegment("Shoulders directly above your hands.", VoiceUrgency.NORMAL, 300),
-                            VoiceSegment("Don't bend your elbows.", VoiceUrgency.CALM, 0)
-                        ))
-                        null
-                    }
-                    CPRStep.COMPRESSIONS -> {
-                        stepVoiceScript = VoiceScript(listOf(
-                            VoiceSegment("Begin compressions now.", VoiceUrgency.URGENT, 200),
-                            VoiceSegment("Push hard and fast!", VoiceUrgency.URGENT, 200),
-                            VoiceSegment("At least 2 inches deep. 100 to 120 per minute.", VoiceUrgency.NORMAL, 0)
-                        ))
-                        null
-                    }
-                    CPRStep.MAINTAIN_RHYTHM ->
-                        "30 compressions done. Give 2 rescue breaths if trained. Otherwise keep compressing."
-                }
-            }
-            // During POSITION_CHECK, speak once when patient lies down
-            cprStep == CPRStep.POSITION_CHECK && positionReady && !lastIsLying -> {
-                lastIsLying = true
-                "Great — she's in position. Let's begin CPR."
-            }
-            cprStep == CPRStep.POSITION_CHECK && !positionReady -> {
-                lastIsLying = false
-                "Roll her onto her back on a firm, flat surface."
-            }
-            else -> {
-                if (!isPatient) lastIsLying = false
-                null
+        lastPoseTimestamp = maxOf(lastPoseTimestamp, input.poseTimestamp)
+        lastHandTimestamp = maxOf(lastHandTimestamp, input.handTimestamp)
+        val temporal = compressionDetector.getTemporalState(input.timestamp)
+        latest = latest.copy(spatial = spatial, temporal = temporal, confidence = confidence,
+            isPatientDetected = patient.first)
+        return snapshot(input.timestamp)
+    }
+
+    fun snapshot(nowMs: Long = SystemClock.elapsedRealtime()): GuidanceState {
+        val state = fsm.getState()
+        val entered = announcedVersion != fsm.version
+        var voice: String? = null
+        if (entered) {
+            announcedVersion = fsm.version
+            voice = fsm.instruction()
+            if (state == FSMState.COMPRESSION_ACTIVE) {
+                activeSince = nowMs; compressionDetector.reset(); milestone = 0
+                latest = latest.copy(temporal = TemporalState())
             }
         }
-
-        // Trigger MAINTAIN_RHYTHM step after every 30 compressions
-        val compressionCount = cprWorkflow.compressionCount
-        if (cprWorkflow.currentStep == CPRStep.COMPRESSIONS &&
-            compressionCount > 0 && compressionCount % 30 == 0 &&
-            compressionCount > lastAnnouncedCompressionMilestone + 25
-        ) {
-            cprWorkflow.triggerMaintainRhythm(nowMs)
+        fsm.history.filter { it.version > transitionLogged }.forEach {
+            Log.i("SanjeevaniFSM", "${it.timestamp} ${it.from} -> ${it.to} v${it.version}: ${it.reason}")
+            transitionLogged = it.version
         }
-
-        // ── Visual classification ─────────────────────────────────────────────
-        classifier.addFrame(frame.poseLandmarks)
-        val fsmState = emergencyFSM.getState()
-        if (fsmState == FSMState.SCENE_ASSESSMENT || fsmState == FSMState.TRIAGE_DETECTION) {
-            classifierSignal = classifier.classify()
-        }
-        val triageState = when {
-            fsmState == FSMState.TRIAGE_DETECTION -> TriageState.CAMERA_SUGGESTS
-            emergencyFSM.getConfirmedEmergencyType() != EmergencyType.UNKNOWN -> TriageState.USER_CONFIRMED
-            else -> TriageState.OBSERVING
-        }
-
-        // ── Spatial reasoning ─────────────────────────────────────────────────
-        val spatial = spatialReasoner.compute(
-            frame.poseLandmarks,
-            frame.leftHandLandmarks,
-            frame.rightHandLandmarks,
-            nowMs
-        )
-
-        // ── Compression detection (feed wrist Y position) ─────────────────────
-        val wristY = frame.poseLandmarks?.let { pose ->
-            if (pose.size > RIGHT_WRIST) {
-                val lw = pose[LEFT_WRIST]
-                val rw = pose[RIGHT_WRIST]
-                when {
-                    lw.visibility > 0.4f && lw.visibility >= rw.visibility -> lw.y
-                    rw.visibility > 0.4f -> rw.y
-                    else -> null
-                }
-            } else null
-        }
-        wristY?.let { compressionDetector.addSample(it, nowMs) }
-        val temporal = compressionDetector.getTemporalState(nowMs)
-        cprWorkflow.updateCompressionMetrics(
-            temporal.compressionCount,
-            temporal.compressionRateBPM
-        )
-
-        // ── Build initial guidance state ───────────────────────────────────────
-        val isRescuer = !isPatient && poseConf > 0.5f
-
-        val prelimGuidance = GuidanceState(
-            fsmState = emergencyFSM.getState(),
-            emergencyType = emergencyFSM.getConfirmedEmergencyType(),
-            spatial = spatial,
-            temporal = temporal,
-            confidence = confidence,
-            isPatientDetected = isPatient,
-            isRescuerDetected = isRescuer,
-            triageState = triageState,
-            classifierSignal = classifierSignal
-        )
-
-        // ── FSM transition ─────────────────────────────────────────────────────
-        // During the opening eight-second voice window, keep the FSM in its opening
-        // state. Speech selection or the timeout explicitly releases this gate.
-        val transition = if (openingVoiceTriagePending &&
-            (emergencyFSM.getState() == FSMState.IDLE ||
-                emergencyFSM.getState() == FSMState.SCENE_ASSESSMENT)
-        ) {
-            FSMTransitionResult(emergencyFSM.getState(), null)
-        } else {
-            emergencyFSM.process(prelimGuidance, nowMs)
-        }
-
-        // ── Module dispatch ────────────────────────────────────────────────────
-        val confirmedType = emergencyFSM.getConfirmedEmergencyType()
-        val moduleResult: ModuleResult? = when (transition.newState) {
-            FSMState.ALLERGIC_PROTOCOL      -> allergicModule.process(frame, nowMs)
-            FSMState.STROKE_FAST_TEST       -> strokeModule.process(frame, nowMs)
-            // In this app, the Heart Attack card represents the cardiac-emergency
-            // entry point into the guided CPR sequence. Do not dispatch the separate
-            // conscious-patient aspirin/sitting protocol here.
-            FSMState.HEART_ATTACK_CONSCIOUS -> null
-            else -> null
-        }
-
-        // ── Spatial action voice (hand placement corrections) ─────────────────
-        val compressionStartVoice = "Press hard and fast! Keep going — don't stop!"
-        val compressionStartVoicePending = cprWorkflow.currentStep == CPRStep.COMPRESSIONS &&
-            spatial.correctiveAction == SpatialAction.CORRECT &&
-            !hasSpokenCompressionStart
-        val spatialActionVoice: String? = if (cprWorkflow.currentStep == CPRStep.HAND_PLACEMENT ||
-            cprWorkflow.currentStep == CPRStep.COMPRESSIONS
-        ) {
-            when {
-                compressionStartVoicePending -> compressionStartVoice
-                spatial.correctiveAction == SpatialAction.MOVE_LEFT ->
-                    "A little to the left — follow the blue marker."
-                spatial.correctiveAction == SpatialAction.MOVE_RIGHT ->
-                    "Shift right — keep your hands on the blue circle."
-                spatial.correctiveAction == SpatialAction.MOVE_UP ->
-                    "Move up slightly — center on the blue marker."
-                spatial.correctiveAction == SpatialAction.MOVE_DOWN ->
-                    "Come down a bit — you're above the target."
-                else -> null
-            }
-        } else null
-
-        val throttledSpatialActionVoice = spatialActionVoice?.takeIf { voice ->
-            if (voice == compressionStartVoice) return@takeIf true
-            if (nowMs - lastSpatialVoiceTs >= 3_000L) {
-                lastSpatialVoiceTs = nowMs
-                true
-            } else {
-                false
-            }
-        }
-
-        val currentBpm = cprWorkflow.currentBpm
-        if (cprWorkflow.currentStep == CPRStep.COMPRESSIONS &&
-            compressionCount > 0 && compressionCount % 10 == 0 &&
-            compressionCount > lastAnnouncedCompressionMilestone
-        ) {
-            pendingCompressionMilestone = compressionCount
-        }
-        val paceVoice: String? = if (
-            cprWorkflow.currentStep == CPRStep.COMPRESSIONS &&
-            nowMs - paceVoiceTs >= 4_000L
-        ) {
-            when {
-                pendingCompressionMilestone > lastAnnouncedCompressionMilestone -> {
-                    val milestone = pendingCompressionMilestone
-                    pendingCompressionMilestone = 0
-                    lastAnnouncedCompressionMilestone = milestone
-                    paceVoiceTs = nowMs
-                    "$milestone compressions. Keep going!"
-                }
-                currentBpm in 0.1f..<90f -> {
-                    paceVoiceTs = nowMs
-                    "Faster! Push harder — aim for 100 per minute."
-                }
-                currentBpm > 130f -> {
-                    paceVoiceTs = nowMs
-                    "Slow down slightly — steady rhythm."
+        val spatial = latest.spatial
+        val temporal = latest.temporal
+        if (voice == null && state == FSMState.COMPRESSION_ACTIVE && temporal.trackingReliable &&
+            nowMs - paceVoiceTs >= 4000) {
+            voice = when {
+                temporal.rateStatus == RateStatus.TOO_SLOW -> "A little faster. Aim for one hundred to one hundred twenty per minute."
+                temporal.rateStatus == RateStatus.TOO_FAST -> "Slow down slightly. Keep a steady rhythm."
+                temporal.compressionCount / 30 > milestone -> {
+                    milestone = temporal.compressionCount / 30
+                    "Keep going. Follow the dispatcher."
                 }
                 else -> null
             }
-        } else null
-
-        // ── Voice throttling ───────────────────────────────────────────────────
-        // Priority: step script > step voice > pace > spatial correction > module > FSM transition
-        val activeScript = if (nowMs < guidanceDeferredUntilMs) null else stepVoiceScript
-        val rawVoice = if (nowMs < guidanceDeferredUntilMs) null
-        else stepVoice ?: paceVoice ?: throttledSpatialActionVoice ?: moduleResult?.voiceText ?: transition.voiceText
-        val voiceText = rawVoice?.let { text ->
-            if (text != lastVoiceText || nowMs - lastVoiceTs > MIN_VOICE_INTERVAL_MS) {
-                lastVoiceText = text
-                lastVoiceTs = nowMs
-                text
-            } else null
+            if (voice != null) paceVoiceTs = nowMs
         }
-        // Throttle scripts the same way (use first segment text as the key)
-        val voiceScript = activeScript?.let { script ->
-            val key = script.segments.firstOrNull()?.text ?: return@let null
-            if (key != lastVoiceText || nowMs - lastVoiceTs > MIN_VOICE_INTERVAL_MS) {
-                lastVoiceText = key
-                lastVoiceTs = nowMs
-                script
-            } else null
-        }
-        if (voiceText == compressionStartVoice) {
-            hasSpokenCompressionStart = true
-        }
-        // Assign urgency based on voice type
-        val voiceUrgency = when {
-            voiceScript != null -> VoiceUrgency.NORMAL   // script manages its own urgency per segment
-            paceVoice != null && voiceText == paceVoice -> VoiceUrgency.URGENT
-            throttledSpatialActionVoice != null && voiceText == throttledSpatialActionVoice -> VoiceUrgency.URGENT
-            else -> VoiceUrgency.NORMAL
-        }
-
-        // ── Build AR overlay ───────────────────────────────────────────────────
-        // Never show CPR Step 1 while the app is still observing or asking what
-        // happened. CPR cards begin only after CPR is explicitly selected and the
-        // responsiveness check has completed.
-        val showCprProtocol = (confirmedType == EmergencyType.CPR ||
-            confirmedType == EmergencyType.HEART_ATTACK) &&
-            transition.newState !in setOf(
-                FSMState.IDLE,
-                FSMState.SCENE_ASSESSMENT,
-                FSMState.TRIAGE_DETECTION,
-                FSMState.RESPONSIVENESS_CHECK
-            )
-        val moduleOverlay = moduleResult?.overlay?.copy(
-            skeletonLines = buildSkeletonLines(frame.poseLandmarks),
-            jointPoints = buildJointPoints(frame.poseLandmarks),
-            faceMeshPoints = buildFaceMeshPoints(frame.faceLandmarks)
-        )
-        val overlay = moduleOverlay
-            ?: if (showCprProtocol) {
-                buildOverlay(transition.newState, spatial, temporal, frame, confirmedType, positionReady)
-            } else {
-                buildObservationOverlay(frame, confirmedType)
+        if (voice == null && state == FSMState.HAND_POSITIONING && nowMs - lastCorrectionTs >= 3000) {
+            voice = when (spatial.correctiveAction) {
+                SpatialAction.MOVE_LEFT -> "Move a little toward the left of the screen."
+                SpatialAction.MOVE_RIGHT -> "Move a little toward the right of the screen."
+                SpatialAction.MOVE_UP -> "Move a little toward the top of the screen."
+                SpatialAction.MOVE_DOWN -> "Move a little toward the bottom of the screen."
+                SpatialAction.TRACKING_LOST -> "I can't see clearly. Adjust the camera, or confirm placement yourself. Don't delay CPR for tracking."
+                else -> null
             }
-
-        val effectiveType = if (confirmedType != EmergencyType.UNKNOWN) confirmedType else EmergencyType.CPR
-
-        return GuidanceState(
-            fsmState = transition.newState,
-            emergencyType = effectiveType,
-            spatial = spatial,
-            temporal = temporal,
-            confidence = confidence,
-            overlay = overlay,
-            voiceText = if (voiceScript == null) voiceText else null,
-            voiceScript = voiceScript,
-            voiceUrgency = voiceUrgency,
-            isPatientDetected = isPatient,
-            isRescuerDetected = isRescuer,
-            triageState = triageState,
-            classifierSignal = classifierSignal
-        )
+            if (voice != null) lastCorrectionTs = nowMs
+        }
+        val title = when (state) {
+            FSMState.CPR_POSITIONING, FSMState.POSITION_CONFIRMED -> "1. Position Check"
+            FSMState.HAND_POSITIONING -> "3. Hand Placement"
+            FSMState.POSTURE_CHECK -> "4. Body Position"
+            FSMState.COMPRESSION_ACTIVE -> "5. Chest Compressions"
+            FSMState.RESPONSIVENESS_CHECK -> "Check response"
+            FSMState.BREATHING_ASSESSMENT -> "Check normal breathing"
+            FSMState.HEART_ATTACK_CONSCIOUS -> "Monitor • follow 112"
+            FSMState.CPR_SUCCESS -> "Emergency team taking over"
+            else -> ""
+        }
+        val cpr = state in setOf(FSMState.HAND_POSITIONING, FSMState.POSTURE_CHECK, FSMState.COMPRESSION_ACTIVE)
+        val status = when (state) {
+            FSMState.CPR_POSITIONING -> "Not yet verified • camera estimate"
+            FSMState.POSITION_CONFIRMED -> "✓ Estimate stable • confirm surface"
+            FSMState.COMPRESSION_ACTIVE -> if (temporal.trackingReliable)
+                "${temporal.compressionCount} estimated cycles | ${temporal.compressionRateBPM.toInt()} BPM"
+                else "${temporal.compressionCount} estimated cycles • tracking unavailable"
+            FSMState.HAND_POSITIONING -> "Approximate marker • not clinical verification"
+            else -> "Follow dispatcher instructions"
+        }
+        val overlay = AROverlaySpec(
+            sternumTarget = spatial.sternumTarget.takeIf { cpr },
+            leftHandCenter = spatial.handMidpoint.takeIf { cpr },
+            arrowFrom = spatial.handMidpoint.takeIf { state == FSMState.HAND_POSITIONING && spatial.correctiveAction != SpatialAction.CORRECT },
+            arrowTo = spatial.sternumTarget.takeIf { state == FSMState.HAND_POSITIONING },
+            guidanceText = if (state == FSMState.HAND_POSITIONING) directionLabel(spatial.correctiveAction) else "",
+            skeletonLines = buildSkeletonLines(frame?.poseLandmarks),
+            jointPoints = buildJointPoints(frame?.poseLandmarks),
+            stepCardTitle = title, stepCardInstruction = if (title.isNotEmpty()) fsm.instruction() else "",
+            stepCardStatus = status,
+            stepCardBgColor = when (state) {
+                FSMState.CPR_POSITIONING -> Color.rgb(185,40,40)
+                FSMState.POSITION_CONFIRMED -> Color.rgb(34,139,34)
+                else -> Color.argb(220,0,80,150)
+            },
+            compressionCount = temporal.compressionCount,
+            compressionRate = temporal.compressionRateBPM.takeIf { temporal.trackingReliable },
+            elapsedSecs = if (state == FSMState.COMPRESSION_ACTIVE) ((nowMs-activeSince)/1000).toInt().coerceAtLeast(0) else 0,
+            showCPRBadge = cpr, showVitalsPanel = false,
+            statusColorGreen = spatial.correctiveAction == SpatialAction.CORRECT,
+            emergencyType = fsm.getConfirmedEmergencyType(), state = state,
+            confirmationEvent = fsm.history.lastOrNull { it.to == FSMState.POSITION_CONFIRMED }?.version ?: 0,
+            imageWidth = frame?.imageWidth ?: 1, imageHeight = frame?.imageHeight ?: 1,
+            countReliable = temporal.trackingReliable)
+        latest = latest.copy(fsmState = state, emergencyType = fsm.getConfirmedEmergencyType(),
+            overlay = overlay, voiceText = voice, voiceScript = null, stateVersion = fsm.version,
+            triageState = if (fsm.getConfirmedEmergencyType() == EmergencyType.UNKNOWN) TriageState.OBSERVING else TriageState.USER_CONFIRMED)
+        return latest
     }
 
-    private fun buildOverlay(
-        state: FSMState,
-        spatial: SpatialState,
-        temporal: TemporalState,
-        frame: PerceptionFrame,
-        emergencyType: EmergencyType = EmergencyType.CPR,
-        isPatientLying: Boolean = false
-    ): AROverlaySpec {
-        val cprStep = cprWorkflow.currentStep
-        val skeletonLines = buildSkeletonLines(frame.poseLandmarks)
-        val jointPoints = buildJointPoints(frame.poseLandmarks)
-        val faceMeshPoints = buildFaceMeshPoints(frame.faceLandmarks)
-
-        // iOS exact step card data (CardiacArrestView.swift CPRStep enum)
-        val stepCardTitle: String
-        val stepCardInstruction: String
-        val stepCardStatus: String
-        val stepCardBgColor: Int
-        val stepCardIcon: String
-
-        val isLyingNow = isPatientLying
-
-        when (cprStep) {
-            CPRStep.POSITION_CHECK -> {
-                stepCardTitle = "1. Position Check"
-                stepCardInstruction = if (isLyingNow)
-                    "Person is on their back on firm surface. Ready to begin CPR."
-                else
-                    "Ensure person is on their back on a firm, flat surface, with one arm on each side. Roll them over if needed."
-                stepCardStatus = if (isLyingNow) "✓ Ready for CPR →" else "Help person lie down"
-                stepCardBgColor = if (isLyingNow)
-                    Color.rgb(34, 139, 34)          // 0xFF228B22 — person is lying correctly
-                else
-                    Color.rgb(185, 40, 40)          // 0xFFB92828 — not yet in position
-                stepCardIcon = "👤"
-            }
-            CPRStep.KNEEL_BESIDE -> {
-                stepCardTitle = "2. Kneel Beside Person"
-                stepCardInstruction = "Kneel beside the person. Position knees near body, shoulder-width apart."
-                stepCardStatus = "Get into position"
-                stepCardBgColor = Color.argb(210, 220, 110, 0)   // iOS .orange
-                stepCardIcon = "🧎"
-            }
-            CPRStep.HAND_PLACEMENT -> {
-                stepCardTitle = "3. Hand Placement"
-                stepCardInstruction = "Place one hand on the blue marker in the center of the chest."
-                stepCardStatus = "Position one hand on blue marker"
-                stepCardBgColor = Color.argb(210, 190, 155, 0)   // iOS .yellow (dark enough for white text)
-                stepCardIcon = "🤚"
-            }
-            CPRStep.BODY_POSITION -> {
-                stepCardTitle = "4. Body Position"
-                stepCardInstruction = "Lock your arms straight. Shoulders directly above your hands. Don't bend your elbows."
-                stepCardStatus = "Straighten arms"
-                stepCardBgColor = Color.argb(210, 220, 110, 0)   // orange
-                stepCardIcon = "💪"
-            }
-            CPRStep.COMPRESSIONS -> {
-                stepCardTitle = "5. Chest Compressions"
-                stepCardInstruction = "Push hard and fast - at least 2 inches deep"
-                stepCardStatus = "${cprWorkflow.compressionCount} compressions | " +
-                    "${cprWorkflow.currentBpm.toInt()} BPM"
-                stepCardBgColor = Color.argb(210, 0, 100, 215)   // iOS .blue
-                stepCardIcon = "❤️"
-            }
-            CPRStep.MAINTAIN_RHYTHM -> {
-                stepCardTitle = "6. Maintain Rhythm"
-                stepCardInstruction = "30 compressions done. Give 2 rescue breaths if trained. Otherwise keep compressing."
-                stepCardStatus = "Continue compressions"
-                stepCardBgColor = Color.argb(210, 0, 100, 215)   // blue
-                stepCardIcon = "🔄"
-            }
-        }
-
-        // Blue chest sphere shows from Step 3 onward
-        val showSternum = cprStep == CPRStep.HAND_PLACEMENT || cprStep == CPRStep.BODY_POSITION ||
-            cprStep == CPRStep.COMPRESSIONS || cprStep == CPRStep.MAINTAIN_RHYTHM
-        val sternumTarget = if (showSternum) spatial.sternumTarget else null
-        val handPlacementCorrection = if (
-            cprStep == CPRStep.HAND_PLACEMENT &&
-            spatial.correctiveAction != SpatialAction.CORRECT &&
-            spatial.correctiveAction != SpatialAction.TRACKING_LOST
-        ) {
-            actionToText(spatial.correctiveAction)
-        } else {
-            ""
-        }
-
-        return AROverlaySpec(
-            sternumTarget = sternumTarget,
-            statusColorGreen = cprStep == CPRStep.COMPRESSIONS &&
-                spatial.correctiveAction == SpatialAction.CORRECT,
-            guidanceText = handPlacementCorrection,
-            skeletonLines = skeletonLines,
-            jointPoints = jointPoints,
-            faceMeshPoints = faceMeshPoints,
-            stepCardTitle = stepCardTitle,
-            stepCardInstruction = stepCardInstruction,
-            stepCardStatus = stepCardStatus,
-            stepCardBgColor = stepCardBgColor,
-            stepCardIcon = stepCardIcon,
-            compressionCount = cprWorkflow.compressionCount,
-            compressionRate = cprWorkflow.currentBpm,
-            elapsedSecs = cprWorkflow.elapsedSecs,
-            showVitalsPanel = (cprStep == CPRStep.COMPRESSIONS || cprStep == CPRStep.MAINTAIN_RHYTHM),
-            showCPRBadge = true,
-            emergencyType = emergencyType
-        )
+    private fun directionLabel(action: SpatialAction) = when(action) {
+        SpatialAction.MOVE_LEFT -> "← Screen left"
+        SpatialAction.MOVE_RIGHT -> "Screen right →"
+        SpatialAction.MOVE_UP -> "↑ Screen up"
+        SpatialAction.MOVE_DOWN -> "↓ Screen down"
+        SpatialAction.TRACKING_LOST -> "Tracking unavailable"
+        else -> ""
     }
-
-    /** Camera/skeleton-only overlay used before a protocol has been confirmed. */
-    private fun buildObservationOverlay(
-        frame: PerceptionFrame,
-        emergencyType: EmergencyType
-    ): AROverlaySpec = AROverlaySpec(
-        skeletonLines = buildSkeletonLines(frame.poseLandmarks),
-        jointPoints = buildJointPoints(frame.poseLandmarks),
-        faceMeshPoints = buildFaceMeshPoints(frame.faceLandmarks),
-        emergencyType = emergencyType
-    )
-
-    private fun actionToText(action: SpatialAction): String = when (action) {
-        SpatialAction.MOVE_LEFT -> "← Move Left"
-        SpatialAction.MOVE_RIGHT -> "Move Right →"
-        SpatialAction.MOVE_UP -> "↑ Move Up"
-        SpatialAction.MOVE_DOWN -> "↓ Move Down"
-        SpatialAction.CORRECT -> ""
-        SpatialAction.TRACKING_LOST -> "Hold camera steady"
-        SpatialAction.UNSURE -> ""
+    fun answer(answer: Answer, expectedVersion: Long = fsm.version) =
+        fsm.answer(answer, SystemClock.elapsedRealtime(), expectedVersion)
+    fun invalidateVision() {
+        visionAfter = SystemClock.elapsedRealtime()
+        spatialReasoner.reset()
+        compressionDetector.trackingLost()
+        latest = latest.copy(spatial = SpatialState(correctiveAction = SpatialAction.TRACKING_LOST),
+            temporal = compressionDetector.getTemporalState(visionAfter))
     }
-
+    fun confirmNoResponse() { answer(Answer.NO) }
+    fun onPatientResponsive() { answer(Answer.YES) }
+    fun setUserSelectedEmergency(type: EmergencyType) { fsm.setUserSelectedEmergency(type, SystemClock.elapsedRealtime()) }
+    fun showEmergencySelection() { fsm.setUserSelectedEmergency(EmergencyType.UNKNOWN, SystemClock.elapsedRealtime()) }
+    fun onStrokeSpeechResult(positive: Boolean) { /* Legacy UI: no autonomous clinical escalation. */ }
     // iOS-matching skeleton bones (mirrors Bones.swift — no face/finger clutter)
     private val SKELETON_BONES = listOf(
         // Neck: nose → shoulders (approximates iOS neck_1 → spine_7 → shoulders)
@@ -601,44 +298,4 @@ class SanjeevaniEngine {
         }
     }
 
-    fun confirmNoResponse() = emergencyFSM.confirmNoResponse(currentEngineTimeMs())
-    fun onPatientResponsive() = emergencyFSM.onPatientResponsive(currentEngineTimeMs())
-    fun getFSMState() = emergencyFSM.getState()
-
-    fun setUserSelectedEmergency(type: EmergencyType) {
-        openingVoiceTriagePending = false
-        val nowMs = currentEngineTimeMs()
-        emergencyFSM.setUserSelectedEmergency(type, nowMs)
-        spatialReasoner.reset()
-        if (type != EmergencyType.ALLERGIC_REACTION) allergicModule.reset()
-        if (type != EmergencyType.FAST_STROKE) strokeModule.reset()
-        if (type != EmergencyType.HEART_ATTACK) heartAttackModule.reset()
-        if (type == EmergencyType.CPR || type == EmergencyType.HEART_ATTACK) {
-            cprWorkflow.reset()
-            lastAnnouncedStep = null
-            lastIsLying = false
-            lastSpatialVoiceTs = 0L
-            hasSpokenCompressionStart = false
-            lastObservedCprStep = null
-            paceVoiceTs = 0L
-            pendingCompressionMilestone = 0
-            lastAnnouncedCompressionMilestone = 0
-            compressionDetector.reset()
-        }
-    }
-
-    fun showEmergencySelection() {
-        if (!openingVoiceTriagePending) return
-        openingVoiceTriagePending = false
-        emergencyFSM.setUserSelectedEmergency(EmergencyType.UNKNOWN, currentEngineTimeMs())
-    }
-
-    fun deferGuidance(durationMs: Long) {
-        guidanceDeferredUntilMs = currentEngineTimeMs() + durationMs
-    }
-
-    private fun currentEngineTimeMs(): Long =
-        latestFrameTimestampMs.takeIf { it > 0L } ?: android.os.SystemClock.elapsedRealtime()
-
-    fun onStrokeSpeechResult(positive: Boolean) = strokeModule.onSpeechResult(positive)
 }

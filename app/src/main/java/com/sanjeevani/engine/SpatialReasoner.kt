@@ -19,16 +19,14 @@ private const val MIDDLE_FINGER_MCP = 9
 private const val RING_FINGER_MCP = 13
 private const val PINKY_MCP = 17
 
-private const val STERNUM_TORSO_RATIO = 0.28f   // 28% from shoulder midpoint toward hips (CPR point)
+private const val STERNUM_TORSO_RATIO = 0.35f   // Approximate screen-space chest target; not clinical validation
 private const val CORRECTION_THRESHOLD = 0.04f
 private const val HYSTERESIS = 0.01f
 private const val MIN_ACTION_CHANGE_MS = 500L
-// If two hands are detected and their centers are more than this apart, they are NOT stacked.
-// 0.08 in normalized coords ≈ 58px at 720px wide — more than one hand-width apart = wrong.
-private const val HAND_STACK_THRESHOLD = 0.08f
 
 class SpatialReasoner {
 
+    private var selectedHand: String? = null
     private var lastAction = SpatialAction.UNSURE
     private var lastActionChangeTs = 0L
     private val smoothedErrorX = ExponentialMovingAverage(alpha = 0.3f)
@@ -47,6 +45,8 @@ class SpatialReasoner {
         lastSternumX = null
         lastSternumY = null
         lastAction = SpatialAction.UNSURE
+        lastActionChangeTs = 0L
+        selectedHand = null
     }
 
     fun compute(
@@ -56,10 +56,12 @@ class SpatialReasoner {
         nowMs: Long
     ): SpatialState {
         val target = estimateSternumTarget(poseLandmarks)
-            ?: return SpatialState(correctiveAction = SpatialAction.TRACKING_LOST)
+            ?: run { reset(); return SpatialState(correctiveAction = SpatialAction.TRACKING_LOST) }
 
-        val (handCenter, handSpread) = estimateBothHandsCenterAndSpread(leftHand, rightHand)
-            ?: (estimateWristCenter(poseLandmarks) to 0f)
+        // Single-hand mode: if both hands happen to be visible, track whichever
+        // palm is closer to the sternum instead of averaging or requiring stacking.
+        val handCenter = estimateSingleHandCenter(leftHand, rightHand, target)
+
         if (handCenter == null) return SpatialState(
             sternumTarget = target,
             correctiveAction = SpatialAction.TRACKING_LOST
@@ -71,27 +73,34 @@ class SpatialReasoner {
         val smoothDy = smoothedErrorY.update(rawDy)
         val mag = sqrt(smoothDx * smoothDx + smoothDy * smoothDy)
 
-        val action = computeAction(smoothDx, smoothDy, mag, handSpread, nowMs)
+        val rawMag = sqrt(rawDx * rawDx + rawDy * rawDy)
+        val action = if (rawMag > CORRECTION_THRESHOLD + HYSTERESIS && lastAction == SpatialAction.CORRECT) {
+            lastAction = SpatialAction.UNSURE
+            lastActionChangeTs = 0L
+            computeAction(rawDx, rawDy, rawMag, nowMs)
+        } else computeAction(smoothDx, smoothDy, mag, nowMs)
 
         return SpatialState(
             sternumTarget = target,
             handMidpoint = handCenter,
             errorVector = PointF(smoothDx, smoothDy),
             errorMagnitude = mag,
-            correctiveAction = action
+            correctiveAction = if (action == SpatialAction.CORRECT && rawMag > CORRECTION_THRESHOLD + HYSTERESIS)
+                SpatialAction.UNSURE else action,
+            trackedHand = selectedHand
         )
     }
 
     private fun estimateSternumTarget(pose: List<NormalizedLandmark>?): PointF? {
-        pose ?: return lastKnown()
-        if (pose.size <= RIGHT_HIP) return lastKnown()
+        pose ?: return null
+        if (pose.size <= RIGHT_HIP) return null
         val ls = pose[LEFT_SHOULDER]
         val rs = pose[RIGHT_SHOULDER]
         val lh = pose[LEFT_HIP]
         val rh = pose[RIGHT_HIP]
 
         val shoulderVis = (ls.visibility + rs.visibility) / 2f
-        if (shoulderVis < 0.25f) return lastKnown()
+        if (listOf(ls, rs, lh, rh).any { it.visibility < .65f || !it.x.isFinite() || !it.y.isFinite() }) return null
 
         val shoulderMidX = (ls.x + rs.x) / 2f
         val shoulderMidY = (ls.y + rs.y) / 2f
@@ -114,28 +123,26 @@ class SpatialReasoner {
         return PointF(x, y)
     }
 
-    // Returns center + spread between the two palms (0f if only one hand detected).
-    private fun estimateBothHandsCenterAndSpread(
+    private fun estimateSingleHandCenter(
         left: List<NormalizedLandmark>?,
-        right: List<NormalizedLandmark>?
-    ): Pair<PointF, Float>? {
+        right: List<NormalizedLandmark>?,
+        target: PointF
+    ): PointF? {
         val lc = left?.let { palmCenter(it) }
         val rc = right?.let { palmCenter(it) }
-        return when {
-            lc != null && rc != null -> {
-                val cx = (lc.x + rc.x) / 2f
-                val cy = (lc.y + rc.y) / 2f
-                val spread = sqrt((lc.x - rc.x).let { it * it } + (lc.y - rc.y).let { it * it })
-                Pair(PointF(cx, cy), spread)
-            }
-            lc != null -> Pair(lc, 0f)
-            rc != null -> Pair(rc, 0f)
+        if (selectedHand == null) selectedHand = when {
+            lc != null && rc != null -> if (distanceSquared(lc, target) <= distanceSquared(rc, target)) "left" else "right"
+            lc != null -> "left"
+            rc != null -> "right"
             else -> null
         }
+        val result = if (selectedHand == "left") lc else rc
+        if (result == null) { selectedHand = null; smoothedErrorX.reset(); smoothedErrorY.reset() }
+        return result
     }
 
-    private fun palmCenter(hand: List<NormalizedLandmark>): PointF {
-        if (hand.size <= PINKY_MCP) return PointF(hand[0].x, hand[0].y)
+    private fun palmCenter(hand: List<NormalizedLandmark>): PointF? {
+        if (hand.size <= PINKY_MCP || hand.any { !it.x.isFinite() || !it.y.isFinite() || it.visibility < .65f }) return null
         val x = (hand[INDEX_FINGER_MCP].x + hand[MIDDLE_FINGER_MCP].x +
                  hand[RING_FINGER_MCP].x + hand[PINKY_MCP].x) / 4f
         val y = (hand[INDEX_FINGER_MCP].y + hand[MIDDLE_FINGER_MCP].y +
@@ -143,19 +150,28 @@ class SpatialReasoner {
         return PointF(x, y)
     }
 
-    private fun estimateWristCenter(pose: List<NormalizedLandmark>?): PointF? {
+    private fun estimateWristCenter(pose: List<NormalizedLandmark>?, target: PointF): PointF? {
         pose ?: return null
         if (pose.size <= 16) return null
         val lw = pose[15]  // LEFT_WRIST
         val rw = pose[16]  // RIGHT_WRIST
-        if (lw.visibility < 0.4f && rw.visibility < 0.4f) return null
-        return PointF((lw.x + rw.x) / 2f, (lw.y + rw.y) / 2f)
+        val left = PointF(lw.x, lw.y).takeIf { lw.visibility >= 0.4f }
+        val right = PointF(rw.x, rw.y).takeIf { rw.visibility >= 0.4f }
+        return when {
+            left != null && right != null -> if (distanceSquared(left, target) <= distanceSquared(right, target)) left else right
+            left != null -> left
+            else -> right
+        }
     }
 
-    private fun computeAction(dx: Float, dy: Float, mag: Float, spread: Float, nowMs: Long): SpatialAction {
+    private fun distanceSquared(a: PointF, b: PointF): Float {
+        val dx = a.x - b.x
+        val dy = a.y - b.y
+        return dx * dx + dy * dy
+    }
+
+    private fun computeAction(dx: Float, dy: Float, mag: Float, nowMs: Long): SpatialAction {
         val newAction = when {
-            // Hands are detected but not stacked — regardless of center position
-            spread > HAND_STACK_THRESHOLD -> SpatialAction.STACK_HANDS
             mag < CORRECTION_THRESHOLD - HYSTERESIS -> SpatialAction.CORRECT
             abs(dx) > abs(dy) -> if (dx > 0) SpatialAction.MOVE_LEFT else SpatialAction.MOVE_RIGHT
             else -> if (dy > 0) SpatialAction.MOVE_UP else SpatialAction.MOVE_DOWN

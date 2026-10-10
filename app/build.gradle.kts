@@ -50,6 +50,7 @@ android {
     buildFeatures {
         compose = true
     }
+    testOptions { unitTests.isIncludeAndroidResources = true }
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -63,6 +64,8 @@ android {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.14.1")
     // Kokoro TTS via sherpa-onnx (auto-downloaded by downloadSherpaOnnx task below)
     implementation(files("libs/sherpa-onnx-android.aar"))
     implementation(libs.androidx.core.ktx)
@@ -83,6 +86,7 @@ dependencies {
 
     // MediaPipe Tasks
     implementation(libs.mediapipe.tasks.vision)
+    implementation(libs.mediapipe.tasks.genai)
 
     // Coroutines
     implementation(libs.kotlinx.coroutines.android)

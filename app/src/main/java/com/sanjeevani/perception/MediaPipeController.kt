@@ -107,9 +107,15 @@ class MediaPipeController(private val context: Context) {
         faceLandmarker?.detectAsync(mpImage, timestampMs)
 
         // LIVE_STREAM results arrive asynchronously — read the most recent snapshot
-        val poseResult = latestPoseResult
-        val handResult = latestHandResult
-        val faceResult = latestFaceResult
+        // Never relabel cached inference as a new observation. Ambiguous multi-person
+        // scenes require reframing; selecting first() silently can swap patient/rescuer.
+        val poseResult = latestPoseResult?.takeIf {
+            timestampMs - it.timestampMs() in 0..300 && it.landmarks().size == 1
+        }
+        val handResult = latestHandResult?.takeIf {
+            timestampMs - it.timestampMs() in 0..250
+        }
+        val faceResult = latestFaceResult?.takeIf { timestampMs - it.timestampMs() in 0..300 }
 
         // 2D normalized screen landmarks
         val poseLandmarks = poseResult?.landmarks()
@@ -146,7 +152,9 @@ class MediaPipeController(private val context: Context) {
             imageWidth = width,
             imageHeight = height,
             worldLandmarks = worldLandmarks,
-            faceLandmarks = faceLandmarks
+            faceLandmarks = faceLandmarks,
+            poseTimestamp = poseResult?.timestampMs() ?: timestampMs,
+            handTimestamp = handResult?.timestampMs() ?: timestampMs
         )
     }
 

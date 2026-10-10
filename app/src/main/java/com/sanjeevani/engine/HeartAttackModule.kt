@@ -1,6 +1,6 @@
 package com.sanjeevani.engine
 
-import android.graphics.PointF
+import android.graphics.Color
 import com.sanjeevani.model.*
 
 private enum class HeartAttackPhase {
@@ -31,20 +31,6 @@ class HeartAttackModule : EmergencyModule {
         if (startMs < 0) startMs = nowMs
         val elapsed = nowMs - startMs
 
-        // Auto-escalate: if patient has become unresponsive (now lying flat) → trigger CPR
-        if (patientNowLying(frame)) {
-            return ModuleResult(
-                voiceText = "They have become unresponsive. Begin CPR immediately.",
-                overlay = AROverlaySpec(
-                    statusText = "⚠ Start CPR",
-                    statusColorGreen = false,
-                    emergencyType = EmergencyType.HEART_ATTACK,
-                    guidanceText = "Begin CPR now"
-                ),
-                isComplete = true
-            )
-        }
-
         val newPhase = phaseForElapsed(elapsed)
         val phaseChanged = newPhase != currentPhase
         currentPhase = newPhase
@@ -59,6 +45,19 @@ class HeartAttackModule : EmergencyModule {
             statusText = overlayText(currentPhase),
             statusColorGreen = currentPhase == HeartAttackPhase.MONITORING,
             guidanceText = PHASE_VOICE[currentPhase] ?: "",
+            stepCardTitle = phaseTitle(currentPhase),
+            stepCardInstruction = PHASE_VOICE[currentPhase] ?: "",
+            stepCardStatus = if (currentPhase == HeartAttackPhase.MONITORING) {
+                "✓ Keep monitoring"
+            } else {
+                "Call 1 1 2 now"
+            },
+            stepCardBgColor = if (currentPhase == HeartAttackPhase.MONITORING) {
+                Color.rgb(34, 139, 34)
+            } else {
+                Color.rgb(194, 65, 12)
+            },
+            stepCardIcon = "🫀",
             emergencyType = EmergencyType.HEART_ATTACK,
             phaseProgress = progress
         )
@@ -95,14 +94,11 @@ class HeartAttackModule : EmergencyModule {
         HeartAttackPhase.MONITORING      -> "✓ Monitoring"
     }
 
-    // Detect if patient is now lying flat — shoulder span horizontal > vertical / 0.7
-    private fun patientNowLying(frame: PerceptionFrame): Boolean {
-        val pose = frame.poseLandmarks ?: return false
-        if (pose.size <= 12) return false
-        val ls = pose[11]; val rs = pose[12]
-        if (ls.visibility < 0.4f || rs.visibility < 0.4f) return false
-        val spanX = kotlin.math.abs(rs.x - ls.x)
-        val spanY = kotlin.math.abs(rs.y - ls.y)
-        return spanX > 0.12f && spanX > spanY / 0.7f
+    private fun phaseTitle(phase: HeartAttackPhase): String = when (phase) {
+        HeartAttackPhase.SIT_DOWN        -> "1. Sit Down"
+        HeartAttackPhase.LOOSEN_CLOTHING -> "2. Loosen Clothing"
+        HeartAttackPhase.ASPIRIN_PROMPT  -> "3. Aspirin Check"
+        HeartAttackPhase.MONITORING      -> "4. Monitor"
     }
+
 }
