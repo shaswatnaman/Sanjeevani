@@ -20,20 +20,20 @@ private const val RING_FINGER_MCP = 13
 private const val PINKY_MCP = 17
 
 private const val STERNUM_TORSO_RATIO = 0.35f   // Approximate screen-space chest target; not clinical validation
-private const val CORRECTION_THRESHOLD = 0.04f
-private const val HYSTERESIS = 0.01f
-private const val MIN_ACTION_CHANGE_MS = 500L
+private const val CORRECTION_THRESHOLD = 0.09f  // Wider zone — tolerates camera wobble during compressions
+private const val HYSTERESIS = 0.03f            // Larger dead-band so CORRECT state is sticky
+private const val MIN_ACTION_CHANGE_MS = 800L   // Longer hold before issuing a new direction
 
 class SpatialReasoner {
 
     private var selectedHand: String? = null
     private var lastAction = SpatialAction.UNSURE
     private var lastActionChangeTs = 0L
-    private val smoothedErrorX = ExponentialMovingAverage(alpha = 0.3f)
-    private val smoothedErrorY = ExponentialMovingAverage(alpha = 0.3f)
-    // Heavy smoothing on the sphere position to eliminate jitter
-    private val smoothedSternumX = ExponentialMovingAverage(alpha = 0.08f)
-    private val smoothedSternumY = ExponentialMovingAverage(alpha = 0.08f)
+    private val smoothedErrorX = ExponentialMovingAverage(alpha = 0.2f)
+    private val smoothedErrorY = ExponentialMovingAverage(alpha = 0.2f)
+    // Moderate smoothing — responsive enough to track camera movement without lagging
+    private val smoothedSternumX = ExponentialMovingAverage(alpha = 0.18f)
+    private val smoothedSternumY = ExponentialMovingAverage(alpha = 0.18f)
     private var lastSternumX: Float? = null
     private var lastSternumY: Float? = null
 
