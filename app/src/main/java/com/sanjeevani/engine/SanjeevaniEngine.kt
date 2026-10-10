@@ -20,6 +20,7 @@ class SanjeevaniEngine {
     private val patientDetector = PatientDetector()
     private val compressionDetector = CompressionDetector()
     private val allergicModule = AllergicReactionModule()
+    private val strokeModule = StrokeModule()
     private var latest = GuidanceState()
     private var frame: PerceptionFrame? = null
     private var lastPoseTimestamp = -1L
@@ -37,6 +38,8 @@ class SanjeevaniEngine {
     private var responseVoiceOverride: String? = null
     private var pendingAllergicVoice: String? = null
     private var latestAllergicOverlay: AROverlaySpec? = null
+    private var pendingStrokeVoice: String? = null
+    private var latestStrokeOverlay: AROverlaySpec? = null
     private var visionAfter = 0L
     private var reportedConcern = ""
     private val answers = ArrayDeque<DialogueEvidence>()
@@ -113,6 +116,12 @@ class SanjeevaniEngine {
             if (result.voiceText != null) pendingAllergicVoice = result.voiceText
             latestAllergicOverlay = result.overlay
         }
+        // Stroke FAST assessment: step-timed progression, camera-anchored skeleton overlay.
+        if (state == FSMState.STROKE_FAST_TEST) {
+            val result = strokeModule.process(safeFrame, input.timestamp)
+            if (result.voiceText != null) pendingStrokeVoice = result.voiceText
+            latestStrokeOverlay = result.overlay
+        }
         return snapshot(input.timestamp)
     }
 
@@ -132,6 +141,9 @@ class SanjeevaniEngine {
                 // Module owns all phase voice; reset so it starts clean from this entry.
                 allergicModule.reset(); pendingAllergicVoice = null; latestAllergicOverlay = null
             }
+            if (state == FSMState.STROKE_FAST_TEST) {
+                strokeModule.reset(); pendingStrokeVoice = null; latestStrokeOverlay = null
+            }
         }
         fsm.history.filter { it.version > transitionLogged }.forEach {
             Log.i("SanjeevaniFSM", "${it.timestamp} ${it.from} -> ${it.to} v${it.version}: ${it.reason}")
@@ -143,6 +155,10 @@ class SanjeevaniEngine {
         // Allergic reaction phase voice: fires once per phase transition (timer-driven).
         if (voice == null && state == FSMState.ALLERGIC_PROTOCOL) {
             pendingAllergicVoice?.let { voice = it; pendingAllergicVoice = null }
+        }
+        // Stroke FAST step voice: fires on each step transition.
+        if (voice == null && state == FSMState.STROKE_FAST_TEST) {
+            pendingStrokeVoice?.let { voice = it; pendingStrokeVoice = null }
         }
         if (voice == null && state == FSMState.COMPRESSION_ACTIVE && temporal.trackingReliable &&
             nowMs - paceVoiceTs >= (if (temporal.rateStatus == RateStatus.TOO_SLOW) 2000L else 4000L)) {
@@ -168,6 +184,28 @@ class SanjeevaniEngine {
                 else -> null
             }
             if (voice != null) lastCorrectionTs = nowMs
+        }
+        // Stroke FAST assessment: return overlay built from module result.
+        if (state == FSMState.STROKE_FAST_TEST) {
+            val base = latestStrokeOverlay ?: AROverlaySpec(emergencyType = EmergencyType.FAST_STROKE)
+            val phaseLabel = base.statusText.takeIf { it.isNotEmpty() } ?: "FAST Test"
+            val strokeOverlay = base.copy(
+                skeletonLines = buildSkeletonLines(frame?.poseLandmarks),
+                jointPoints = buildJointPoints(frame?.poseLandmarks),
+                stepCardTitle = phaseLabel,
+                stepCardInstruction = base.guidanceText.takeIf { it.isNotEmpty() } ?: fsm.instruction(),
+                stepCardStatus = if (base.phaseProgress >= 1.0f) "Assessment complete" else "FAST Assessment",
+                stepCardBgColor = if (base.statusColorGreen) android.graphics.Color.rgb(34, 139, 34)
+                    else android.graphics.Color.rgb(185, 40, 40),
+                showCPRBadge = false,
+                state = state,
+                imageWidth = frame?.imageWidth ?: 1,
+                imageHeight = frame?.imageHeight ?: 1
+            )
+            latest = latest.copy(fsmState = state, emergencyType = EmergencyType.FAST_STROKE,
+                overlay = strokeOverlay, voiceText = voice, stateVersion = fsm.version,
+                triageState = TriageState.USER_CONFIRMED)
+            return latest
         }
         // Allergic reaction: return a complete overlay built from the module's latest result.
         if (state == FSMState.ALLERGIC_PROTOCOL) {
@@ -274,9 +312,10 @@ class SanjeevaniEngine {
         responseVoiceOverride = null
         spatialReasoner.reset()
         compressionDetector.trackingLost()
-        // For allergic reaction, the module timer continues even when camera is unavailable.
+        // For allergic reaction and stroke, the module timer continues when camera is unavailable.
         // Clear only the pending voice to avoid re-announcing on resume.
         if (fsm.getState() == FSMState.ALLERGIC_PROTOCOL) pendingAllergicVoice = null
+        if (fsm.getState() == FSMState.STROKE_FAST_TEST) pendingStrokeVoice = null
         latest = latest.copy(spatial = SpatialState(correctiveAction = SpatialAction.TRACKING_LOST),
             temporal = compressionDetector.getTemporalState(visionAfter))
     }
@@ -286,6 +325,9 @@ class SanjeevaniEngine {
         allergicModule.reset()
         pendingAllergicVoice = null
         latestAllergicOverlay = null
+        strokeModule.reset()
+        pendingStrokeVoice = null
+        latestStrokeOverlay = null
         compressionDetector.trackingLost()
         spatialReasoner.reset()
         frozenSternumTarget = null
@@ -304,7 +346,11 @@ class SanjeevaniEngine {
     fun onPatientResponsive() { answer(Answer.YES) }
     fun setUserSelectedEmergency(type: EmergencyType) { fsm.setUserSelectedEmergency(type, SystemClock.elapsedRealtime()) }
     fun showEmergencySelection() { fsm.setUserSelectedEmergency(EmergencyType.UNKNOWN, SystemClock.elapsedRealtime()) }
-    fun onStrokeSpeechResult(positive: Boolean) { /* Legacy UI: no autonomous clinical escalation. */ }
+    fun onStrokeSpeechResult(positive: Boolean) {
+        strokeModule.onSpeechResult(positive)
+        // Voice for RESULT step is buffered on the next process() call; clear any stale pending voice now.
+        pendingStrokeVoice = null
+    }
     // iOS-matching skeleton bones (mirrors Bones.swift — no face/finger clutter)
     private val SKELETON_BONES = listOf(
         // Neck: nose → shoulders (approximates iOS neck_1 → spine_7 → shoulders)

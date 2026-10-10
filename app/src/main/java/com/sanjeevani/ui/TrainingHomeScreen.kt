@@ -26,6 +26,7 @@ private data class TrainingModule(
 private val modules = listOf(
     TrainingModule("cpr",      "CPR",               "Cardiopulmonary Resuscitation",    "❤️",  true),
     TrainingModule("allergy",  "Allergic Reaction", "Anaphylaxis & EpiPen Protocol",    "💉",  true),
+    TrainingModule("stroke",   "Stroke",            "FAST Recognition & Response",      "🧠",  true),
     TrainingModule("aed",      "AED",               "Automated External Defibrillator", "⚡",  false),
     TrainingModule("choking",  "Choking",           "First Aid for Choking",             "🫁",  false),
     TrainingModule("recovery", "Recovery Position", "Safe Lateral Position",             "🛌",  false),
@@ -35,6 +36,7 @@ private val modules = listOf(
 fun TrainingHomeScreen(
     onStartCpr: () -> Unit,
     onStartAllergicReaction: () -> Unit,
+    onStartStroke: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -46,7 +48,7 @@ fun TrainingHomeScreen(
     ) {
         AppHeader()
         SectionLabel("Training Modules")
-        ModuleGrid(onStartCpr, onStartAllergicReaction)
+        ModuleGrid(onStartCpr, onStartAllergicReaction, onStartStroke)
         DisclaimerText()
     }
 }
@@ -93,6 +95,7 @@ private fun SectionLabel(text: String) {
 private fun ModuleGrid(
     onStartCpr: () -> Unit,
     onStartAllergicReaction: () -> Unit,
+    onStartStroke: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         modules.chunked(2).forEach { row ->
@@ -104,6 +107,7 @@ private fun ModuleGrid(
                     val action: (() -> Unit)? = when (module.id) {
                         "cpr"     -> onStartCpr
                         "allergy" -> onStartAllergicReaction
+                        "stroke"  -> onStartStroke
                         else      -> null
                     }
                     TrainingCard(

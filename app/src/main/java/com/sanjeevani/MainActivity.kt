@@ -92,7 +92,8 @@ class MainActivity : ComponentActivity() {
                 when (destination) {
                     "home" -> TrainingHomeScreen(
                         onStartCpr = { destination = "cpr" },
-                        onStartAllergicReaction = { destination = "allergy" }
+                        onStartAllergicReaction = { destination = "allergy" },
+                        onStartStroke = { destination = "stroke" }
                     )
                     "cpr" -> {
                         BackHandler { destination = "home" }
@@ -107,6 +108,19 @@ class MainActivity : ComponentActivity() {
                             viewModel.onEmergencySelected(EmergencyType.ALLERGIC_REACTION)
                         }
                         SanjeevaniScreen(viewModel)
+                    }
+                    "stroke" -> {
+                        BackHandler {
+                            viewModel.resetForNewEmergency()
+                            destination = "home"
+                        }
+                        LaunchedEffect(Unit) {
+                            viewModel.onEmergencySelected(EmergencyType.FAST_STROKE)
+                        }
+                        SanjeevaniScreen(viewModel, onReturnHome = {
+                            viewModel.resetForNewEmergency()
+                            destination = "home"
+                        })
                     }
                 }
             }
@@ -182,7 +196,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun SanjeevaniScreen(viewModel: SanjeevaniViewModel) {
+fun SanjeevaniScreen(viewModel: SanjeevaniViewModel, onReturnHome: (() -> Unit)? = null) {
     val guidance by viewModel.guidanceState.collectAsStateWithLifecycle()
     val isListening by viewModel.isListening.collectAsStateWithLifecycle()
     val isSpeaking by viewModel.isSpeaking.collectAsStateWithLifecycle()
@@ -368,28 +382,60 @@ fun SanjeevaniScreen(viewModel: SanjeevaniViewModel) {
             )
         }
 
-        // Stroke speech buttons (shown during FAST speech step)
+        // Stroke FAST assessment controls: speech buttons during speech step, done button at result
         if (guidance.fsmState == FSMState.STROKE_FAST_TEST) {
-            Row(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(horizontal = 16.dp, vertical = 40.dp)
-                    .fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Button(
-                    onClick = { viewModel.onStrokeSpeechResult(true) },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF22C55E)),
-                    modifier = Modifier.weight(1f)
+            val strokeProgress = guidance.overlay.phaseProgress
+            if (strokeProgress >= 0.75f && strokeProgress < 1.0f) {
+                // Speech step — rescuer taps to report result
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(horizontal = 16.dp, vertical = 40.dp)
+                        .fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Text("✓ Speech Clear", color = Color.White, fontSize = 14.sp)
+                    Button(
+                        onClick = { viewModel.onStrokeSpeechResult(true) },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF22C55E)),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("✓ Speech Clear", color = Color.White, fontSize = 14.sp)
+                    }
+                    Button(
+                        onClick = { viewModel.onStrokeSpeechResult(false) },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("✗ Speech Slurred", color = Color.White, fontSize = 14.sp)
+                    }
                 }
-                Button(
-                    onClick = { viewModel.onStrokeSpeechResult(false) },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)),
-                    modifier = Modifier.weight(1f)
+            } else if (strokeProgress >= 1.0f) {
+                // Result step — show done and call 112 options
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(horizontal = 16.dp, vertical = 24.dp)
+                        .fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text("✗ Speech Slurred", color = Color.White, fontSize = 14.sp)
+                    Button(
+                        onClick = {
+                            if (!muted) viewModel.toggleMuted()
+                            activity?.startActivity(android.content.Intent(android.content.Intent.ACTION_DIAL,
+                                android.net.Uri.parse("tel:112")))
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.Red),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("📞 Call 112 Now", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Button(
+                        onClick = { onReturnHome?.invoke() },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E3A5F)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Done — Return Home", color = Color.White, fontSize = 14.sp)
+                    }
                 }
             }
         }

@@ -48,6 +48,8 @@ class EmergencyFSM {
         FSMState.CPR_PAUSE -> "Follow the emergency dispatcher. Tap resume when you want app guidance."
         FSMState.ALLERGIC_PROTOCOL ->
             "Anaphylaxis protocol. Call one one two now. Follow the on-screen guidance and voice instructions."
+        FSMState.STROKE_FAST_TEST ->
+            "Follow the on-screen FAST assessment. Watch their face, arms, and speech carefully. Call one one two now — do not delay."
         else -> "Call one one two now. Follow the emergency dispatcher's instructions."
     }
     fun expectsAnswer() = state in setOf(FSMState.IDLE, FSMState.SCENE_ASSESSMENT,
@@ -61,6 +63,8 @@ class EmergencyFSM {
             EmergencyType.UNKNOWN -> transition(FSMState.TRIAGE_DETECTION, nowMs, "selection fallback")
             EmergencyType.ALLERGIC_REACTION -> transition(FSMState.ALLERGIC_PROTOCOL, nowMs,
                 "allergic reaction selected; begin anaphylaxis protocol")
+            EmergencyType.FAST_STROKE -> transition(FSMState.STROKE_FAST_TEST, nowMs,
+                "stroke selected; begin FAST assessment")
             else -> transition(FSMState.RESPONSIVENESS_CHECK, nowMs,
                 "reported concern: $selected; diagnosis not inferred")
         }
