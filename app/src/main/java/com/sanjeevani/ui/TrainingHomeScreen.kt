@@ -25,13 +25,17 @@ private data class TrainingModule(
 
 private val modules = listOf(
     TrainingModule("cpr",      "CPR",               "Cardiopulmonary Resuscitation",    "❤️",  true),
+    TrainingModule("allergy",  "Allergic Reaction", "Anaphylaxis & EpiPen Protocol",    "💉",  true),
     TrainingModule("aed",      "AED",               "Automated External Defibrillator", "⚡",  false),
     TrainingModule("choking",  "Choking",           "First Aid for Choking",             "🫁",  false),
     TrainingModule("recovery", "Recovery Position", "Safe Lateral Position",             "🛌",  false),
 )
 
 @Composable
-fun TrainingHomeScreen(onStartCpr: () -> Unit) {
+fun TrainingHomeScreen(
+    onStartCpr: () -> Unit,
+    onStartAllergicReaction: () -> Unit,
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -42,7 +46,7 @@ fun TrainingHomeScreen(onStartCpr: () -> Unit) {
     ) {
         AppHeader()
         SectionLabel("Training Modules")
-        ModuleGrid(onStartCpr)
+        ModuleGrid(onStartCpr, onStartAllergicReaction)
         DisclaimerText()
     }
 }
@@ -86,7 +90,10 @@ private fun SectionLabel(text: String) {
 }
 
 @Composable
-private fun ModuleGrid(onStartCpr: () -> Unit) {
+private fun ModuleGrid(
+    onStartCpr: () -> Unit,
+    onStartAllergicReaction: () -> Unit,
+) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         modules.chunked(2).forEach { row ->
             Row(
@@ -94,9 +101,14 @@ private fun ModuleGrid(onStartCpr: () -> Unit) {
                 modifier = Modifier.fillMaxWidth()
             ) {
                 row.forEach { module ->
+                    val action: (() -> Unit)? = when (module.id) {
+                        "cpr"     -> onStartCpr
+                        "allergy" -> onStartAllergicReaction
+                        else      -> null
+                    }
                     TrainingCard(
                         module = module,
-                        onStart = if (module.id == "cpr") onStartCpr else null,
+                        onStart = action,
                         modifier = Modifier.weight(1f)
                     )
                 }

@@ -44,6 +44,7 @@ import androidx.compose.ui.zIndex
 import com.sanjeevani.llm.LlmState
 import com.sanjeevani.tts.KokoroState
 import com.sanjeevani.ui.AROverlayView
+import com.sanjeevani.ui.AllergicReactionTrainingScreen
 import com.sanjeevani.ui.EmergencySelectionScreen
 import com.sanjeevani.ui.TrainingHomeScreen
 import java.util.concurrent.ExecutorService
@@ -88,12 +89,19 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
-                var onTrainingHome by remember { mutableStateOf(true) }
-                if (onTrainingHome) {
-                    TrainingHomeScreen(onStartCpr = { onTrainingHome = false })
-                } else {
-                    BackHandler { onTrainingHome = true }
-                    SanjeevaniScreen(viewModel)
+                var destination by remember { mutableStateOf("home") }
+                when (destination) {
+                    "home" -> TrainingHomeScreen(
+                        onStartCpr = { destination = "cpr" },
+                        onStartAllergicReaction = { destination = "allergy" }
+                    )
+                    "cpr" -> {
+                        BackHandler { destination = "home" }
+                        SanjeevaniScreen(viewModel)
+                    }
+                    "allergy" -> {
+                        AllergicReactionTrainingScreen(onBack = { destination = "home" })
+                    }
                 }
             }
         }

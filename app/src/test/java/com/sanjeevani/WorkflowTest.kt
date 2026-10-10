@@ -6,6 +6,9 @@ import com.sanjeevani.voice.*
 import org.junit.Assert.*
 import org.junit.Test
 
+private fun emptyFrame(nowMs: Long) =
+    PerceptionFrame(nowMs, null, null, null, 720, 1280)
+
 class WorkflowTest {
     private fun assessment() = EmergencyFSM().also { it.setUserSelectedEmergency(EmergencyType.HEART_ATTACK, 1000) }
     private fun position() = assessment().also { it.answer(Answer.NO, 1100); it.answer(Answer.NO, 1200) }
@@ -133,6 +136,38 @@ class WorkflowTest {
         assertFalse(f.answer(result.answer,1100))
         assertTrue(SessionDialogue.help("how fast",f.getState(),f.instruction()).contains("responding"))
     }
+    @Test fun allergicModuleAdvancesThroughPhases() {
+        val module = AllergicReactionModule()
+        // t=0: LAY_FLAT
+        val t0 = module.process(emptyFrame(0), 0)
+        assertNotNull("Phase 0 should speak on first call", t0.voiceText)
+        assertTrue(t0.voiceText!!.contains("flat", ignoreCase = true))
+        assertFalse(t0.isComplete)
+        // t=17001: RAISE_LEGS
+        val t17 = module.process(emptyFrame(17001), 17001)
+        assertNotNull("Phase 1 should speak on transition", t17.voiceText)
+        assertTrue(t17.voiceText!!.contains("leg", ignoreCase = true))
+        // t=48001: EPIPEN_READY
+        val t48 = module.process(emptyFrame(48001), 48001)
+        assertNotNull("Phase 3 should speak on transition", t48.voiceText)
+        assertTrue(t48.voiceText!!.contains("EpiPen", ignoreCase = true))
+        // t=91000: session complete after 90 s
+        val t91 = module.process(emptyFrame(91000), 91000)
+        assertTrue(t91.isComplete)
+    }
+
+    @Test fun allergicModuleResetRestartsCycle() {
+        val module = AllergicReactionModule()
+        module.process(emptyFrame(0), 0)
+        module.process(emptyFrame(20_000), 20_000)
+        module.reset()
+        // After reset startMs=-1; next process sets startMs=21000, elapsed=0 → LAY_FLAT
+        val r = module.process(emptyFrame(21_000), 21_000)
+        assertNotNull("Should speak LAY_FLAT instruction after reset", r.voiceText)
+        assertTrue(r.voiceText!!.contains("flat", ignoreCase = true))
+        assertFalse("Should not be complete immediately after reset", r.isComplete)
+    }
+
     @Test fun compressionActiveDialogueInterpretsPlainYesNo() {
         val active = FSMState.COMPRESSION_ACTIVE
         assertEquals(Answer.YES, SessionDialogue.interpret("yes", active).answer)
