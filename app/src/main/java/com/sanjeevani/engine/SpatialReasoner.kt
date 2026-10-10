@@ -24,6 +24,15 @@ private const val CORRECTION_THRESHOLD = 0.09f  // Wider zone — tolerates came
 private const val HYSTERESIS = 0.03f            // Larger dead-band so CORRECT state is sticky
 private const val MIN_ACTION_CHANGE_MS = 800L   // Longer hold before issuing a new direction
 
+// Sternum stability constants
+// Keep last known sternum position this long after landmarks drop below threshold.
+// Eliminates jumps from single-frame occlusion events during CPR hand movements.
+private const val STERNUM_HOLD_MS = 600L
+// If the sternum landmark estimate jumps more than this in one frame, it's a bad
+// inference frame (motion blur, compression artifact, wrong person detected).
+// Hold the current smoothed value instead of letting the spike through.
+private const val OUTLIER_THRESHOLD = 0.12f
+
 class SpatialReasoner {
 
     private var selectedHand: String? = null
@@ -31,11 +40,11 @@ class SpatialReasoner {
     private var lastActionChangeTs = 0L
     private val smoothedErrorX = ExponentialMovingAverage(alpha = 0.2f)
     private val smoothedErrorY = ExponentialMovingAverage(alpha = 0.2f)
-    // Moderate smoothing — responsive enough to track camera movement without lagging
     private val smoothedSternumX = ExponentialMovingAverage(alpha = 0.18f)
     private val smoothedSternumY = ExponentialMovingAverage(alpha = 0.18f)
     private var lastSternumX: Float? = null
     private var lastSternumY: Float? = null
+    private var lastGoodSternumTs: Long = 0L   // timestamp of last valid landmark-based estimate
 
     fun reset() {
         smoothedSternumX.reset()
@@ -44,6 +53,7 @@ class SpatialReasoner {
         smoothedErrorY.reset()
         lastSternumX = null
         lastSternumY = null
+        lastGoodSternumTs = 0L
         lastAction = SpatialAction.UNSURE
         lastActionChangeTs = 0L
         selectedHand = null
@@ -55,8 +65,16 @@ class SpatialReasoner {
         rightHand: List<NormalizedLandmark>?,
         nowMs: Long
     ): SpatialState {
-        val target = estimateSternumTarget(poseLandmarks)
-            ?: run { reset(); return SpatialState(correctiveAction = SpatialAction.TRACKING_LOST) }
+        val target = estimateSternumTarget(poseLandmarks, nowMs)
+        if (target == null) {
+            // Truly lost (landmark gap exceeded STERNUM_HOLD_MS): clear hand state too.
+            selectedHand = null
+            smoothedErrorX.reset()
+            smoothedErrorY.reset()
+            lastAction = SpatialAction.UNSURE
+            lastActionChangeTs = 0L
+            return SpatialState(correctiveAction = SpatialAction.TRACKING_LOST)
+        }
 
         // Single-hand mode: if both hands happen to be visible, track whichever
         // palm is closer to the sternum instead of averaging or requiring stacking.
@@ -91,35 +109,68 @@ class SpatialReasoner {
         )
     }
 
-    private fun estimateSternumTarget(pose: List<NormalizedLandmark>?): PointF? {
-        pose ?: return null
-        if (pose.size <= RIGHT_HIP) return null
+    private fun estimateSternumTarget(pose: List<NormalizedLandmark>?, nowMs: Long): PointF? {
+        if (pose == null || pose.size <= RIGHT_HIP) return holdOrNull(nowMs)
         val ls = pose[LEFT_SHOULDER]
         val rs = pose[RIGHT_SHOULDER]
         val lh = pose[LEFT_HIP]
         val rh = pose[RIGHT_HIP]
 
-        val shoulderVis = (ls.visibility + rs.visibility) / 2f
-        if (listOf(ls, rs, lh, rh).any { it.visibility < .65f || !it.x.isFinite() || !it.y.isFinite() }) return null
+        if (listOf(ls, rs, lh, rh).any { it.visibility < .65f || !it.x.isFinite() || !it.y.isFinite() })
+            return holdOrNull(nowMs)
 
         val shoulderMidX = (ls.x + rs.x) / 2f
         val shoulderMidY = (ls.y + rs.y) / 2f
         val hipMidX = (lh.x + rh.x) / 2f
         val hipMidY = (lh.y + rh.y) / 2f
-
         val rawX = shoulderMidX + (hipMidX - shoulderMidX) * STERNUM_TORSO_RATIO
         val rawY = shoulderMidY + (hipMidY - shoulderMidY) * STERNUM_TORSO_RATIO
+
+        // Outlier rejection: if the new estimate jumps more than OUTLIER_THRESHOLD from the
+        // current smoothed position in a single frame, it is almost certainly a bad inference
+        // frame (motion blur, JPEG artefact, wrong pose detected). Hold the current value.
+        val curX = smoothedSternumX.current
+        val curY = smoothedSternumY.current
+        if (curX != null && curY != null) {
+            val jump = kotlin.math.hypot(rawX - curX, rawY - curY)
+            if (jump > OUTLIER_THRESHOLD) {
+                lastGoodSternumTs = nowMs   // reset expiry — we still have a good held position
+                return PointF(curX, curY)
+            }
+        }
+
+        // Adaptive EMA alpha: track camera/body motion quickly, suppress jitter when still.
+        val moveDist = if (curX != null && curY != null)
+            kotlin.math.hypot(rawX - curX, rawY - curY) else 0f
+        val adaptAlpha = when {
+            moveDist > 0.05f -> 0.28f   // fast movement — follow quickly
+            moveDist > 0.015f -> 0.18f  // moderate
+            else -> 0.10f               // nearly stationary — heavily smooth jitter
+        }
+        smoothedSternumX.alpha = adaptAlpha
+        smoothedSternumY.alpha = adaptAlpha
 
         val sx = smoothedSternumX.update(rawX)
         val sy = smoothedSternumY.update(rawY)
         lastSternumX = sx
         lastSternumY = sy
+        lastGoodSternumTs = nowMs
         return PointF(sx, sy)
     }
 
-    private fun lastKnown(): PointF? {
+    /** Keep last known sternum for STERNUM_HOLD_MS after landmarks drop below threshold.
+     *  Prevents jumps from single-frame occlusion during CPR hand movement. */
+    private fun holdOrNull(nowMs: Long): PointF? {
         val x = lastSternumX ?: return null
         val y = lastSternumY ?: return null
+        if (nowMs - lastGoodSternumTs > STERNUM_HOLD_MS) {
+            // Prolonged tracking loss — clear fully so next acquisition starts fresh.
+            lastSternumX = null
+            lastSternumY = null
+            smoothedSternumX.reset()
+            smoothedSternumY.reset()
+            return null
+        }
         return PointF(x, y)
     }
 
@@ -184,8 +235,9 @@ class SpatialReasoner {
     }
 }
 
-class ExponentialMovingAverage(private val alpha: Float) {
+class ExponentialMovingAverage(var alpha: Float) {
     private var value: Float? = null
+    val current: Float? get() = value
     fun update(newValue: Float): Float {
         value = value?.let { alpha * newValue + (1 - alpha) * it } ?: newValue
         return value!!

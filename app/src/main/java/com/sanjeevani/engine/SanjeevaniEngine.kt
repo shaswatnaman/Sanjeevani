@@ -31,6 +31,7 @@ class SanjeevaniEngine {
     private var activeSince = 0L
     private var trackedHand: String? = null
     private var transitionLogged = 0L
+    private var frozenSternumTarget: PointF? = null
     private var visionAfter = 0L
     private var reportedConcern = ""
     private val answers = ArrayDeque<DialogueEvidence>()
@@ -71,6 +72,14 @@ class SanjeevaniEngine {
             if (poseConf >= .65f && handsConf >= .65f) ConfidenceLevel.HIGH else ConfidenceLevel.LOW)
         val newPose = input.poseTimestamp > lastPoseTimestamp && freshPose
         val newHand = input.handTimestamp > lastHandTimestamp && freshHands
+        // Lock the sternum to its first confirmed position when compressions begin.
+        // Camera jitter during compressions must not move the pacing sphere.
+        if (state == FSMState.COMPRESSION_ACTIVE) {
+            if (frozenSternumTarget == null && spatial.sternumTarget != null)
+                frozenSternumTarget = spatial.sternumTarget
+        } else {
+            frozenSternumTarget = null
+        }
         if (state == FSMState.COMPRESSION_ACTIVE && newHand && spatial.handMidpoint != null &&
             spatial.sternumTarget != null && spatial.errorMagnitude < .12f && poseConf >= .65f) {
             if (trackedHand != spatial.trackedHand) compressionDetector.trackingLost()
@@ -159,7 +168,11 @@ class SanjeevaniEngine {
             else -> "Follow dispatcher instructions"
         }
         val overlay = AROverlaySpec(
-            sternumTarget = spatial.sternumTarget.takeIf { cpr },
+            sternumTarget = when {
+                state == FSMState.COMPRESSION_ACTIVE -> frozenSternumTarget ?: spatial.sternumTarget
+                cpr -> spatial.sternumTarget
+                else -> null
+            },
             leftHandCenter = spatial.handMidpoint.takeIf { cpr },
             arrowFrom = spatial.handMidpoint.takeIf { state == FSMState.HAND_POSITIONING && spatial.correctiveAction != SpatialAction.CORRECT },
             arrowTo = spatial.sternumTarget.takeIf { state == FSMState.HAND_POSITIONING },
@@ -200,6 +213,7 @@ class SanjeevaniEngine {
         fsm.answer(answer, SystemClock.elapsedRealtime(), expectedVersion)
     fun invalidateVision() {
         visionAfter = SystemClock.elapsedRealtime()
+        frozenSternumTarget = null
         spatialReasoner.reset()
         compressionDetector.trackingLost()
         latest = latest.copy(spatial = SpatialState(correctiveAction = SpatialAction.TRACKING_LOST),

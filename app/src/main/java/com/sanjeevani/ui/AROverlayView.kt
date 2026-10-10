@@ -224,7 +224,7 @@ class AROverlayView(context: Context) : View(context) {
         }
 
         // ── Sternum target: iOS-style large blue sphere with sheen ────────────
-        (spec.sternumTarget ?: if (spec.state == FSMState.COMPRESSION_ACTIVE) PointF(.5f, .65f) else null)?.let { t ->
+        spec.sternumTarget?.let { t ->
             val px = sx(t.x)
             val py = sy(t.y)
             val baseRadius = 58f
