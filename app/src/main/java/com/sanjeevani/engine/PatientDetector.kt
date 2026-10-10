@@ -23,7 +23,7 @@ private const val MAX_SHOULDER_WORLD_Y_DIFF = 0.18f
 // projected onto the same side. The margin prevents jitter near the torso centre line.
 // Match the skeleton renderer so any arm visibly drawn to the user also participates
 // in posture validation.
-private const val MIN_ARM_VISIBILITY = 0.65f
+private const val MIN_ARM_VISIBILITY = 0.40f
 private const val ARM_SIDE_MARGIN = 0.02f
 
 class PatientDetector {
@@ -75,7 +75,7 @@ class PatientDetector {
         // 2D screen-space detection (original iOS algorithm)
         val shoulderSpanX = abs(ls.x - rs.x)
         val shoulderSpanY = abs(ls.y - rs.y)
-        val isHorizontal = shoulderSpanX > 0.12f && shoulderSpanY < shoulderSpanX * 0.6f
+        val isHorizontal = shoulderSpanX > 0.12f && shoulderSpanY < shoulderSpanX * 0.9f
         val isHorizontalIOS = shoulderSpanX > (shoulderSpanY + 0.001f) * 0.7f
 
         // MediaPipe world Y is not a calibrated gravity/ground axis. Do not use
