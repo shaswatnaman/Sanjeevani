@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
+import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -44,6 +45,7 @@ import com.sanjeevani.llm.LlmState
 import com.sanjeevani.tts.KokoroState
 import com.sanjeevani.ui.AROverlayView
 import com.sanjeevani.ui.EmergencySelectionScreen
+import com.sanjeevani.ui.TrainingHomeScreen
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -86,7 +88,13 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
-                SanjeevaniScreen(viewModel)
+                var onTrainingHome by remember { mutableStateOf(true) }
+                if (onTrainingHome) {
+                    TrainingHomeScreen(onStartCpr = { onTrainingHome = false })
+                } else {
+                    BackHandler { onTrainingHome = true }
+                    SanjeevaniScreen(viewModel)
+                }
             }
         }
     }
