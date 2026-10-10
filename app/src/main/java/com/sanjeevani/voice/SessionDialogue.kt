@@ -59,6 +59,12 @@ object SessionDialogue {
             if ((negative && (positive || has("yes"))) || (positive && has("no", "not"))) return result(Answer.UNCERTAIN)
             return result(if (negative) Answer.NO else if (positive) Answer.YES else Answer.UNKNOWN)
         }
+        if (state == FSMState.COMPRESSION_ACTIVE) {
+            if (plainYes || has("showing signs", "they responded", "responding now"))
+                return result(Answer.YES)
+            if (plainNo || has("no signs", "not showing", "nothing yet"))
+                return result(Answer.NO)
+        }
         if (text in setOf("ready", "i am ready", "i'm ready", "done"))
             return result(Answer.READY)
         return result(Answer.UNKNOWN)

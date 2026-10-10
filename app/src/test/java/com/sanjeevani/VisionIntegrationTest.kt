@@ -5,6 +5,7 @@ import android.os.SystemClock
 import com.sanjeevani.engine.*
 import com.sanjeevani.model.*
 import com.sanjeevani.ui.*
+import kotlin.math.*
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -36,8 +37,11 @@ class VisionIntegrationTest {
     @Test fun emptyHandOrMissingPoseCannotReuseLastTarget() {
         val r=SpatialReasoner()
         assertNotNull(r.compute(pose(),hand(.5f,.425f),null,1000).sternumTarget)
-        assertNull(r.compute(null,hand(.5f,.425f),null,1100).sternumTarget)
-        assertEquals(SpatialAction.TRACKING_LOST,r.compute(pose(),emptyList(),null,1200).correctiveAction)
+        // Brief pose gap (within STERNUM_HOLD_MS): target is held to suppress single-frame jitter.
+        assertNotNull(r.compute(null,hand(.5f,.425f),null,1100).sternumTarget)
+        // Extended pose loss (beyond STERNUM_HOLD_MS 600ms): target is cleared; no indefinite reuse.
+        assertNull(r.compute(null,hand(.5f,.425f),null,1700).sternumTarget)
+        assertEquals(SpatialAction.TRACKING_LOST,r.compute(pose(),emptyList(),null,1800).correctiveAction)
     }
     @Test fun patientWristsCannotSubstituteForRescuerHands() {
         assertEquals(SpatialAction.TRACKING_LOST,SpatialReasoner().compute(pose(),null,null,1000).correctiveAction)
@@ -129,5 +133,48 @@ class VisionIntegrationTest {
             e.process(PerceptionFrame(t,pose(),null,null,720,1280,poseTimestamp=old))
         }
         assertEquals(FSMState.CPR_POSITIONING,e.getFSMState())
+    }
+    private fun reachCompressionActive(e: SanjeevaniEngine) {
+        e.setUserSelectedEmergency(EmergencyType.HEART_ATTACK)
+        e.answer(Answer.NO); e.answer(Answer.NO)
+        repeat(12) { e.process(PerceptionFrame(tick(), pose(), null, null, 720, 1280)) }
+        e.answer(Answer.READY); e.snapshot()
+        repeat(12) { e.process(PerceptionFrame(tick(), pose(), hand(.5f, .425f), null, 720, 1280)) }
+        e.answer(Answer.READY); e.snapshot()
+    }
+    @Test fun responseCheckYesAnswerTriggersReassessment() {
+        val e = SanjeevaniEngine()
+        reachCompressionActive(e)
+        assertEquals(FSMState.COMPRESSION_ACTIVE, e.getFSMState())
+        val sternumY = .425f; val amp = .04f
+        var foundCheck = false
+        for (i in 0..2000) {
+            val t = tick(10)
+            val cy = sternumY + amp * sin(2.0 * PI * 110.0 * t / 60000.0).toFloat()
+            val g = e.process(PerceptionFrame(t, pose(), hand(.5f, cy), null, 720, 1280))
+            if (g.voiceText?.contains("signs of life") == true) { foundCheck = true; break }
+        }
+        assertTrue("Expected periodic response check after 30+ compressions", foundCheck)
+        assertEquals(FSMState.COMPRESSION_ACTIVE, e.getFSMState())
+        e.answer(Answer.YES)
+        assertEquals(FSMState.RESPONSIVENESS_CHECK, e.getFSMState())
+    }
+    @Test fun responseCheckNoAnswerContinuesCompressions() {
+        val e = SanjeevaniEngine()
+        reachCompressionActive(e)
+        assertEquals(FSMState.COMPRESSION_ACTIVE, e.getFSMState())
+        val sternumY = .425f; val amp = .04f
+        var foundCheck = false
+        for (i in 0..2000) {
+            val t = tick(10)
+            val cy = sternumY + amp * sin(2.0 * PI * 110.0 * t / 60000.0).toFloat()
+            val g = e.process(PerceptionFrame(t, pose(), hand(.5f, cy), null, 720, 1280))
+            if (g.voiceText?.contains("signs of life") == true) { foundCheck = true; break }
+        }
+        assertTrue("Expected periodic response check after 30+ compressions", foundCheck)
+        e.answer(Answer.NO)
+        assertEquals(FSMState.COMPRESSION_ACTIVE, e.getFSMState())
+        val s = e.snapshot()
+        assertTrue("Expected continuation voice after NO answer", s.voiceText?.contains("No signs") == true)
     }
 }

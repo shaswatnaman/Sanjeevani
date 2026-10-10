@@ -133,4 +133,13 @@ class WorkflowTest {
         assertFalse(f.answer(result.answer,1100))
         assertTrue(SessionDialogue.help("how fast",f.getState(),f.instruction()).contains("responding"))
     }
+    @Test fun compressionActiveDialogueInterpretsPlainYesNo() {
+        val active = FSMState.COMPRESSION_ACTIVE
+        assertEquals(Answer.YES, SessionDialogue.interpret("yes", active).answer)
+        assertEquals(Answer.NO, SessionDialogue.interpret("no", active).answer)
+        assertEquals(Answer.YES, SessionDialogue.interpret("showing signs", active).answer)
+        assertEquals(Answer.NO, SessionDialogue.interpret("no signs", active).answer)
+        // Recovery phrases bypass the response-check path and still return CHANGED.
+        assertEquals(Answer.CHANGED, SessionDialogue.interpret("she woke up", active).answer)
+    }
 }

@@ -32,6 +32,8 @@ class SanjeevaniEngine {
     private var trackedHand: String? = null
     private var transitionLogged = 0L
     private var frozenSternumTarget: PointF? = null
+    private var pendingResponseCheck = false
+    private var responseVoiceOverride: String? = null
     private var visionAfter = 0L
     private var reportedConcern = ""
     private val answers = ArrayDeque<DialogueEvidence>()
@@ -113,6 +115,7 @@ class SanjeevaniEngine {
             voice = fsm.instruction()
             if (state == FSMState.COMPRESSION_ACTIVE) {
                 activeSince = nowMs; compressionDetector.reset(); milestone = 0
+                pendingResponseCheck = false; responseVoiceOverride = null
                 latest = latest.copy(temporal = TemporalState())
             }
         }
@@ -122,14 +125,16 @@ class SanjeevaniEngine {
         }
         val spatial = latest.spatial
         val temporal = latest.temporal
+        if (voice == null) responseVoiceOverride?.let { voice = it; responseVoiceOverride = null }
         if (voice == null && state == FSMState.COMPRESSION_ACTIVE && temporal.trackingReliable &&
-            nowMs - paceVoiceTs >= 4000) {
+            nowMs - paceVoiceTs >= (if (temporal.rateStatus == RateStatus.TOO_SLOW) 2000L else 4000L)) {
             voice = when {
-                temporal.rateStatus == RateStatus.TOO_SLOW -> "A little faster. Aim for one hundred to one hundred twenty per minute."
-                temporal.rateStatus == RateStatus.TOO_FAST -> "Slow down slightly. Keep a steady rhythm."
-                temporal.compressionCount / 30 > milestone -> {
+                temporal.rateStatus == RateStatus.TOO_SLOW -> "Faster! Faster! Increase the pace!"
+                temporal.rateStatus == RateStatus.TOO_FAST -> "Slow down slightly."
+                temporal.compressionCount / 30 > milestone && !pendingResponseCheck -> {
                     milestone = temporal.compressionCount / 30
-                    "Keep going. Follow the dispatcher."
+                    pendingResponseCheck = true
+                    "Are they showing any signs of life, or responding at all? Say yes or no."
                 }
                 else -> null
             }
@@ -209,11 +214,23 @@ class SanjeevaniEngine {
         SpatialAction.TRACKING_LOST -> "Tracking unavailable"
         else -> ""
     }
-    fun answer(answer: Answer, expectedVersion: Long = fsm.version) =
-        fsm.answer(answer, SystemClock.elapsedRealtime(), expectedVersion)
+    fun answer(answer: Answer, expectedVersion: Long = fsm.version): Boolean {
+        if (fsm.getState() == FSMState.COMPRESSION_ACTIVE && pendingResponseCheck) {
+            pendingResponseCheck = false
+            return when (answer) {
+                Answer.YES, Answer.CHANGED -> fsm.answer(Answer.CHANGED, SystemClock.elapsedRealtime(), expectedVersion)
+                Answer.NO -> { responseVoiceOverride = "No signs yet. Good. Keep going."; true }
+                Answer.UNCERTAIN -> { responseVoiceOverride = "Okay. Keep going and watch them carefully."; true }
+                else -> fsm.answer(answer, SystemClock.elapsedRealtime(), expectedVersion)
+            }
+        }
+        return fsm.answer(answer, SystemClock.elapsedRealtime(), expectedVersion)
+    }
     fun invalidateVision() {
         visionAfter = SystemClock.elapsedRealtime()
         frozenSternumTarget = null
+        pendingResponseCheck = false
+        responseVoiceOverride = null
         spatialReasoner.reset()
         compressionDetector.trackingLost()
         latest = latest.copy(spatial = SpatialState(correctiveAction = SpatialAction.TRACKING_LOST),
